@@ -21,12 +21,15 @@ export async function POST(req: NextRequest) {
       if (!(audio instanceof Blob)) {
         return NextResponse.json({ error: "no audio provided" }, { status: 400 });
       }
-      const file = new File([audio], "speech.webm", {
+      const uploadName =
+        audio instanceof File && audio.name ? audio.name : "speech.webm";
+      const file = new File([audio], uploadName, {
         type: audio.type || "audio/webm",
       });
       const transcription = await groq.audio.transcriptions.create({
         file,
         model: STT_MODEL,
+        language: "en", // force English so it doesn't mis-detect other languages
       });
       userText = transcription.text.trim();
     }
@@ -42,6 +45,22 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ transcript: userText, reply, actions });
   } catch (err: any) {
     console.error("/api/voice error", err);
+
+    // Daily usage limit hit on every model — out of our control. Speak a
+    // friendly message instead of dumping a technical error.
+    const isRateLimit =
+      err?.status === 429 || /rate limit|quota/i.test(err?.message || "");
+    if (isRateLimit) {
+      return NextResponse.json({
+        transcript: "",
+        reply:
+          "I've hit my daily AI usage limit, which is out of my control. Please try again later.",
+        actions: [],
+        rateLimited: true,
+      });
+    }
+
+    // Other errors (schema/param/etc) stay raw on purpose, for debugging.
     return NextResponse.json(
       { error: err?.message || "voice pipeline failed" },
       { status: 500 }

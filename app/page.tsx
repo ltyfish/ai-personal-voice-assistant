@@ -2,6 +2,8 @@
 
 import { useCallback, useEffect, useState } from "react";
 import VoiceButton from "@/components/VoiceButton";
+import { expandEvents } from "@/lib/recur";
+import Reminders from "@/components/Reminders";
 
 type Task = {
   id: string;
@@ -11,12 +13,15 @@ type Task = {
   priority: "low" | "medium" | "high";
   dueDate: string | null;
 };
+type Recurrence = "none" | "daily" | "weekly" | "monthly";
 type Event = {
   id: string;
   title: string;
   location: string | null;
   startTime: string;
   endTime: string;
+  recurrence: Recurrence;
+  recurrenceEnd: string | null;
 };
 type Note = {
   id: string;
@@ -34,10 +39,11 @@ export default function Home() {
   const [notes, setNotes] = useState<Note[]>([]);
 
   const refresh = useCallback(async () => {
+    const opts: RequestInit = { cache: "no-store" };
     const [t, e, n] = await Promise.all([
-      fetch("/api/tasks").then((r) => r.json()),
-      fetch("/api/events").then((r) => r.json()),
-      fetch("/api/notes").then((r) => r.json()),
+      fetch("/api/tasks", opts).then((r) => r.json()),
+      fetch("/api/events", opts).then((r) => r.json()),
+      fetch("/api/notes", opts).then((r) => r.json()),
     ]);
     setTasks(t);
     setEvents(e);
@@ -59,9 +65,11 @@ export default function Home() {
         <VoiceButton onDone={refresh} />
       </section>
 
+      <Reminders events={events} tasks={tasks} />
+
       <div className="grid gap-6 md:grid-cols-3">
         <TasksPanel tasks={tasks} refresh={refresh} />
-        <CalendarPanel events={events} refresh={refresh} />
+        <CalendarPanel events={events} tasks={tasks} refresh={refresh} />
         <NotesPanel notes={notes} refresh={refresh} />
       </div>
     </main>
@@ -136,10 +144,34 @@ function TasksPanel({ tasks, refresh }: { tasks: Task[]; refresh: () => void }) 
   );
 }
 
-function CalendarPanel({ events, refresh }: { events: Event[]; refresh: () => void }) {
+type AgendaItem =
+  | { kind: "event"; time: Date; endTime: Date; title: string; id: string; recurrence: Recurrence }
+  | { kind: "task"; time: Date; title: string; id: string; priority: string; done: boolean };
+
+const repeatLabel: Record<Recurrence, string> = {
+  none: "",
+  daily: "repeats daily",
+  weekly: "repeats weekly",
+  monthly: "repeats monthly",
+};
+
+const dayKey = (d: Date) =>
+  d.toLocaleDateString([], { weekday: "short", month: "short", day: "numeric" });
+const timeStr = (d: Date) => d.toLocaleTimeString([], { timeStyle: "short" });
+
+function CalendarPanel({
+  events,
+  tasks,
+  refresh,
+}: {
+  events: Event[];
+  tasks: Task[];
+  refresh: () => void;
+}) {
   const [title, setTitle] = useState("");
   const [start, setStart] = useState("");
   const [end, setEnd] = useState("");
+  const [recurrence, setRecurrence] = useState<Recurrence>("none");
 
   const add = async () => {
     if (!title.trim() || !start || !end) return;
@@ -150,17 +182,65 @@ function CalendarPanel({ events, refresh }: { events: Event[]; refresh: () => vo
         title,
         startTime: new Date(start).toISOString(),
         endTime: new Date(end).toISOString(),
+        recurrence,
       }),
     });
     setTitle("");
     setStart("");
     setEnd("");
+    setRecurrence("none");
     refresh();
   };
   const del = async (id: string) => {
     await fetch(`/api/events/${id}`, { method: "DELETE" });
     refresh();
   };
+
+  // Build a merged agenda for the next 60 days: recurring event occurrences
+  // plus any tasks that have a due date, grouped by day.
+  const from = new Date();
+  from.setHours(0, 0, 0, 0);
+  const to = new Date(from.getTime() + 60 * 24 * 60 * 60 * 1000);
+
+  const items: AgendaItem[] = [];
+  // Show each event only ONCE (its next upcoming occurrence). Recurring events
+  // get a "repeats…" label instead of cluttering every day.
+  const seen = new Set<string>();
+  for (const occ of expandEvents(events, from, to)) {
+    if (seen.has(occ.id)) continue;
+    seen.add(occ.id);
+    items.push({
+      kind: "event",
+      time: new Date(occ.startTime),
+      endTime: new Date(occ.endTime),
+      title: occ.title,
+      id: occ.id,
+      recurrence: (occ.recurrence ?? "none") as Recurrence,
+    });
+  }
+  for (const t of tasks) {
+    if (!t.dueDate) continue;
+    const due = new Date(t.dueDate);
+    if (due >= from && due <= to) {
+      items.push({
+        kind: "task",
+        time: due,
+        title: t.title,
+        id: t.id,
+        priority: t.priority,
+        done: t.done,
+      });
+    }
+  }
+  items.sort((a, b) => a.time.getTime() - b.time.getTime());
+
+  const groups: { day: string; items: AgendaItem[] }[] = [];
+  for (const it of items) {
+    const k = dayKey(it.time);
+    const last = groups[groups.length - 1];
+    if (last && last.day === k) last.items.push(it);
+    else groups.push({ day: k, items: [it] });
+  }
 
   return (
     <Panel title="Calendar">
@@ -183,26 +263,78 @@ function CalendarPanel({ events, refresh }: { events: Event[]; refresh: () => vo
           onChange={(e) => setEnd(e.target.value)}
           className="w-full rounded-lg bg-neutral-800 px-3 py-1.5 text-sm outline-none"
         />
+        <select
+          value={recurrence}
+          onChange={(e) => setRecurrence(e.target.value as Recurrence)}
+          className="w-full rounded-lg bg-neutral-800 px-3 py-1.5 text-sm outline-none"
+        >
+          <option value="none">Does not repeat</option>
+          <option value="daily">Every day</option>
+          <option value="weekly">Every week</option>
+          <option value="monthly">Every month</option>
+        </select>
         <button onClick={add} className="w-full rounded-lg bg-indigo-600 px-3 py-1.5 text-sm hover:bg-indigo-500">
           Add event
         </button>
       </div>
-      <ul className="space-y-2">
-        {events.map((ev) => (
-          <li key={ev.id} className="flex items-start gap-2 text-sm">
-            <div className="flex-1">
-              <div>{ev.title}</div>
-              <div className="text-xs text-neutral-500">
-                {fmt(ev.startTime)} → {new Date(ev.endTime).toLocaleTimeString([], { timeStyle: "short" })}
-              </div>
+
+      <div className="space-y-3">
+        {groups.map((g) => (
+          <div key={g.day}>
+            <div className="mb-1 text-xs font-semibold uppercase tracking-wide text-neutral-500">
+              {g.day}
             </div>
-            <button onClick={() => del(ev.id)} className="text-neutral-600 hover:text-red-400">
-              ✕
-            </button>
-          </li>
+            <ul className="space-y-1">
+              {g.items.map((it) => (
+                <li
+                  key={`${it.kind}-${it.id}-${it.time.toISOString()}`}
+                  className="flex items-start gap-2 text-sm"
+                >
+                  {it.kind === "event" ? (
+                    <>
+                      <span className="mt-0.5 text-indigo-400">●</span>
+                      <div className="flex-1">
+                        <div>
+                          {it.title}
+                          {it.recurrence !== "none" && (
+                            <span className="ml-1 text-xs text-neutral-500">
+                              ↻ {repeatLabel[it.recurrence]}
+                            </span>
+                          )}
+                        </div>
+                        <div className="text-xs text-neutral-500">
+                          {timeStr(it.time)} → {timeStr(it.endTime)}
+                        </div>
+                      </div>
+                      <button
+                        onClick={() => del(it.id)}
+                        title={it.recurrence !== "none" ? "Delete series" : "Delete"}
+                        className="text-neutral-600 hover:text-red-400"
+                      >
+                        ✕
+                      </button>
+                    </>
+                  ) : (
+                    <>
+                      <span className="mt-0.5 text-amber-400">▸</span>
+                      <div className="flex-1">
+                        <div className={it.done ? "text-neutral-500 line-through" : ""}>
+                          {it.title}{" "}
+                          <span className="text-xs text-neutral-500">(task due)</span>
+                        </div>
+                        <div className="text-xs text-neutral-500">{timeStr(it.time)}</div>
+                      </div>
+                    </>
+                  )}
+                </li>
+              ))}
+            </ul>
+          </div>
         ))}
-        {events.length === 0 && <li className="text-sm text-neutral-500">No events.</li>}
-      </ul>
+        {groups.length === 0 && (
+          <p className="text-sm text-neutral-500">Nothing scheduled.</p>
+        )}
+      </div>
     </Panel>
   );
 }

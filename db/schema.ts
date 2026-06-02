@@ -8,6 +8,12 @@ import {
 } from "drizzle-orm/pg-core";
 
 export const priorityEnum = pgEnum("priority", ["low", "medium", "high"]);
+export const recurrenceEnum = pgEnum("recurrence", [
+  "none",
+  "daily",
+  "weekly",
+  "monthly",
+]);
 
 // ---- Tasks ----
 export const tasks = pgTable("tasks", {
@@ -29,6 +35,8 @@ export const events = pgTable("events", {
   location: text("location"),
   startTime: timestamp("start_time", { withTimezone: true }).notNull(),
   endTime: timestamp("end_time", { withTimezone: true }).notNull(),
+  recurrence: recurrenceEnum("recurrence").notNull().default("none"),
+  recurrenceEnd: timestamp("recurrence_end", { withTimezone: true }),
   createdAt: timestamp("created_at", { withTimezone: true })
     .notNull()
     .defaultNow(),

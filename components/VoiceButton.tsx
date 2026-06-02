@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 type Status = "idle" | "recording" | "thinking";
 
@@ -11,32 +11,82 @@ export default function VoiceButton({ onDone }: { onDone: () => void }) {
   const recorderRef = useRef<MediaRecorder | null>(null);
   const chunksRef = useRef<Blob[]>([]);
 
+  // Trigger voice list loading early so the first reply isn't silent.
+  useEffect(() => {
+    if (typeof window === "undefined" || !window.speechSynthesis) return;
+    window.speechSynthesis.getVoices();
+    const handler = () => window.speechSynthesis.getVoices();
+    window.speechSynthesis.addEventListener("voiceschanged", handler);
+    return () =>
+      window.speechSynthesis.removeEventListener("voiceschanged", handler);
+  }, []);
+
   function speak(text: string) {
     try {
+      const synth = window.speechSynthesis;
+      // Recover from the browser getting stuck in a paused/speaking state.
+      synth.resume();
+      synth.cancel();
       const u = new SpeechSynthesisUtterance(text);
+      u.lang = "en-US";
       u.rate = 1.05;
-      window.speechSynthesis.cancel();
-      window.speechSynthesis.speak(u);
+      const enVoice = synth
+        .getVoices()
+        .find((v) => v.lang?.toLowerCase().startsWith("en"));
+      if (enVoice) u.voice = enVoice;
+      synth.speak(u);
+      // Chrome bug: synthesis silently pauses on longer clips — nudge it.
+      setTimeout(() => synth.resume(), 200);
     } catch {
       /* TTS not available — ignore */
     }
   }
 
+  function pickMimeType() {
+    const candidates = [
+      "audio/webm;codecs=opus",
+      "audio/webm",
+      "audio/ogg;codecs=opus",
+      "audio/mp4",
+    ];
+    for (const t of candidates) {
+      if (MediaRecorder.isTypeSupported(t)) return t;
+    }
+    return "";
+  }
+
   async function startRecording() {
     if (status !== "idle") return;
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      const rec = new MediaRecorder(stream);
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          noiseSuppression: true,
+          echoCancellation: true,
+          autoGainControl: true,
+        },
+      });
+      const mimeType = pickMimeType();
+      const rec = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
       chunksRef.current = [];
       rec.ondataavailable = (e) => {
         if (e.data.size > 0) chunksRef.current.push(e.data);
       };
       rec.onstop = () => {
         stream.getTracks().forEach((t) => t.stop());
-        void sendAudio(new Blob(chunksRef.current, { type: "audio/webm" }));
+        const blob = new Blob(chunksRef.current, {
+          type: rec.mimeType || "audio/webm",
+        });
+        // Too small => almost certainly an empty/aborted recording.
+        if (blob.size < 1200) {
+          setStatus("idle");
+          setReply("That was too short — hold the button while you speak.");
+          return;
+        }
+        void sendAudio(blob);
       };
       recorderRef.current = rec;
-      rec.start();
+      // Timeslice => guarantees chunks are flushed even for short clips.
+      rec.start(250);
       setStatus("recording");
       setTranscript("");
       setReply("");
@@ -53,8 +103,13 @@ export default function VoiceButton({ onDone }: { onDone: () => void }) {
 
   async function sendAudio(blob: Blob) {
     try {
+      const ext = blob.type.includes("mp4")
+        ? "mp4"
+        : blob.type.includes("ogg")
+        ? "ogg"
+        : "webm";
       const form = new FormData();
-      form.append("audio", blob, "speech.webm");
+      form.append("audio", blob, `speech.${ext}`);
       const res = await fetch("/api/voice", { method: "POST", body: form });
       const data = await res.json();
       setTranscript(data.transcript || "");

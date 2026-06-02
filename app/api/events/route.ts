@@ -3,6 +3,7 @@ import { asc } from "drizzle-orm";
 import { db, events } from "@/db";
 
 export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
 
 export async function GET() {
   const rows = await db.select().from(events).orderBy(asc(events.startTime));
