@@ -6,14 +6,16 @@ import {
   sleep,
   type RateLimits,
 } from "./groq";
-import { runTool, toolDefs, CLOUD_TOOLS, ALL_GROUPS, type GroupKey } from "./tools";
+import { runTool, toolDefs, CLOUD_TOOLS, ALL_GROUPS, groupsForToolNames, hasProductivityTool, type GroupKey } from "./tools";
 import { recordRateLimit } from "@/lib/mail/blobs";
 import { db, tasks, events, notes, projects } from "@/db";
 import { refOf } from "./refs";
-import { createCompletion } from "./llm";
+import { createCompletion, createCompletionStream } from "./llm";
 import { modelById, type ModelDef } from "./models";
 import { computeModelStatus } from "./model-status";
 import { getMemory, renderMemoryMarkdown } from "./memory";
+import { GENERIC_RULES } from "./ollama-context";
+import { getBehavior } from "./behavior";
 
 // The user's "about me" facts as a markdown block for the cloud prompt. Best-effort
 // — a DB failure returns "" so a turn never breaks over missing memory.
@@ -307,58 +309,29 @@ function clampWords(s: string, max = MAX_REPLY_WORDS): string {
   return words.slice(0, max).join(" ").replace(/[,;:]$/, "") + "…";
 }
 
-// Domain rule blocks, included only when the request activates that group, so a
-// "play a song" request doesn't pay for the email/local rules and vice-versa.
-const RULES_EMAIL = `- EMAIL: the user has a connected Gmail summarized by MailMind. For a DIGEST/SUMMARY request ("what's my digest", "read my email summary", "email digest", "today's emails"), call fetch_emails_now AND list_emails (with today_only=true — this matches the Digest tab) together in the SAME turn, fetch first, and read the result. NEW/RECENT is different: for "what's new", "any new emails", "recent emails", "fetch/check/refresh my email" call ONLY fetch_emails_now — it returns just the emails that arrived SINCE THE LAST FETCH; read them back, and if new_emails is 0 say plainly "No new emails." (So the first ask of the day shows what arrived; asking "new" again right after says nothing new.) Use list_emails to read stored summaries — for "read my email summary"/"email digest" call it with no filter; for "urgent emails" set min_urgency=4; for "the recent/latest urgent email" set min_urgency=4 and limit=1; to look up a sender or company (e.g. "emails from KrisFlyer") set query to that name. Read back the sender, subject, and summary naturally. Use mark_emails_reviewed to mark mail reviewed: all=true for "mark all as reviewed", or query=<sender/keyword> for specific ones. For "the latest fetched email" call list_emails with order="recent" and limit=1.`;
+// Domain rules (email/spotify/messaging/web) and per-tool how-to (refs, done=true,
+// bulk ops, projects, notes) now live in each tool's `description` in lib/tools.ts
+// — the single source of truth read by BOTH cloud and local. The only prompt-level
+// rules left are the CROSS-CUTTING ones in GENERIC_RULES (lib/ollama-context.ts),
+// shared with the local behavior.md so there's no duplication.
 
-const RULES_LOCAL = `- WEB ACTIONS: to READ or SUMMARIZE a page's CONTENT ("summarize the X website", "read me espn.com", "what does <site> say") => read_site (mode "summarize" or "read"). This does NOT open a browser — it fetches the page and reads it back. Only for public pages. Opening apps, folders, or websites on the user's own computer is handled by the local computer assistant, not here — do NOT try to open them. Only call read_site, and only when the user clearly wants to read or summarize a page.`;
+// The STATIC system prefix for the CLOUD path: a one-line persona + GENERIC_RULES.
+// Identical on every request, so Groq's automatic prompt caching reuses it. Local
+// turns get the same generic rules via behavior.md instead (see prepareTurn).
+const CORE_PROMPT = `You are JARVIS, a personal assistant managing the user's tasks, calendar events, notes, and projects. Each tool's own description tells you exactly how to use it; follow these rules the tool schemas don't cover:
+${GENERIC_RULES}`;
 
-const RULES_MESSAGE = `- MESSAGING PEOPLE (free — send a message TO a person, not a note/reminder): use send_message.
-  · \`to\` is a saved contact NAME ("Mom", "Alex") or a raw handle (phone number, @username, or email). Pass exactly what the user said; the system resolves saved contacts.
-  · \`channel\`: set it from how the user phrased it — "text/whatsapp/message X" => "whatsapp"; "telegram/DM X" => "telegram"; "email X" => "email". If they didn't say, OMIT channel and the system picks from what the contact has.
-  · \`message\` is the body to send. Phrase it naturally as the user intends (e.g. "tell Mom I'll be home by 8" => message "I'll be home by 8"). For email you may add a short \`subject\`.
-  · Telegram and email are sent immediately — report success plainly. WhatsApp opens on the user's own computer and is CONFIRMED first, so say something like "Okay, I'll message Mom on WhatsApp if you confirm."
-  · To save someone for later, use add_contact (name plus any of phone/telegram/email). Use list_contacts to read them back, or list_contacts with remove=<name> to delete one.
-  · "Import/sync my contacts", "load my Google/Telegram contacts" => sync_contacts (source "google", "telegram", or "all"). Report back how many were imported. After importing, the user can message those people by name.
-  · If a send fails because a channel isn't set up or the contact has no matching handle, read the error back plainly and suggest adding the detail.`;
-
-const RULES_SPOTIFY = `- SPOTIFY PLAYBACK (Premium, plays immediately — NOT a confirm-first local action):
-  · play_spotify with the right type: a song => type "track"; "play some <artist>" => type "artist"; "play the album X" => "album"; "play my/the playlist X" => "playlist". It really starts the music.
-  · queue_spotify for "queue X", "play X next", "add X to the queue".
-  · spotify_control for ongoing playback: pause, resume, next, previous, now_playing; volume (pass volume 0-100; "turn it up/down" => pick a sensible level); shuffle_on/shuffle_off; repeat_off/repeat_one/repeat_all; save ("save/like this song" — no need to name it, it saves what's playing); restart; seek (pass seconds, e.g. "skip to 1 minute" => 60); transfer (pass device, e.g. "play on my phone").
-  · If a result says no active device, tell the user to open Spotify first. Report the tool's message back in one natural sentence.`;
-
-// The big STATIC prefix (persona + core task/event/note rules). Identical on
-// every request, so Groq's automatic prompt caching reuses it (50% off the
-// cached prefix). Volatile content (date, data snapshot) goes at the END.
-const CORE_PROMPT = `You are a personal assistant managing the user's tasks, calendar events, and notes.
-
-Rules:
-- ALWAYS respond in English, no matter what language the user spoke in.
-- To update or delete something, FIND it in the CURRENT data below and pass its "ref" (e.g. "Task 3", "Event 2", "Note 4") to the matching tool. The ref's word tells you whether it is a task, event, or note — call update_task/delete_task, update_event/delete_event, or delete_note accordingly. The user may speak it loosely ("delete task three", "remove note 4") — map it to the matching ref. Only fall back to a title match if the item is not in the list and the user did not say a ref.
-- To mark a task complete call update_task with done=true; to mark an event complete call update_event with done=true. Completed items move to the user's History.
-- "complete all tasks", "mark all events done", or "complete all projects" => call complete_all with the right target ("tasks", "events", or "projects"). Bulk actions must name which kind — never assume a target the user didn't say.
-- To DELETE in bulk ("delete all events", "delete all my tasks", "clear all notes", "delete all projects") => call delete_all with target "tasks", "events", "notes", or "projects". This removes items whether or not they are completed/marked. Only set status="completed" if the user explicitly says "completed"/"done" ones (or "open" for not-done); otherwise omit it to delete them all. To delete a SINGLE named item, use delete_task/delete_event/delete_note/delete_project instead — those also work on completed items.
-- To UNDO/restore/reopen an item ("undo Task 9", "restore Event 2"), call update_task or update_event with done=false. This only makes sense for items in HISTORY; if the named item is NOT in History (it's already open), do nothing and say it isn't completed.
-- Delete works on any item, including ones in History. "Delete Task 9" removes it whether it is open or completed.
-- If the user explicitly names a ref like "Task 9", use that ref even if it is not shown below (it may be completed). Otherwise never invent refs.
-- "Move/reschedule X to <time>": if X is an event, update_event with new start/end; if X is a task, update_task with a new due_date. Use the CURRENT data to decide which.
-- Time: convert 12-hour speech to 24-hour. "7 pm" = 19:00, "7 am" = 07:00, "noon" = 12:00. Always include the ${TZ} timezone offset in the ISO string, NOT a "Z"/UTC time.
-- Things the user must DO are tasks. Things at a specific time are calendar events. Reminders without a clear time become tasks with a due date.
-- "Every Monday / every day / monthly" means a recurring event: set recurrence accordingly and put start_time on the correct first occurrence (e.g. the next Monday).
-- To move/reschedule an event ("move gym to 8pm", "push the meeting to Friday"), use the event's ref from the CURRENT data and call update_event directly with the new time — do not list first.
-- Make ALL the tool calls a request needs in a SINGLE turn (you can emit several at once). Do not wait to call one tool before another.
-- PROJECTS: a project is a card the user collects "improvements" (notes) on, and can schedule time for. "Create/start a project X" => create_project. "Add an improvement/idea to project X" or "note that ..." about a project => update_project with add_improvement. "Edit/change improvement N of project X" => update_project with edit_improvement_number + edit_improvement_text; "remove improvement N" => update_project with remove_improvement_number; "rename project X" => update_project with new_title. "Complete/finish project X" => update_project with done=true (and "reopen/undo project X" => done=false); completed projects move to History. "What are my projects", "read/summarize project X" => list_projects (omit ref for ALL; the improvements are numbered in the snapshot). "Delete project X" => delete_project. A project's scheduled TIME is handled by ONE tool, project_time, with action "add" (block out a new time: "add time to project X tomorrow 3pm"), "reschedule" (move an existing time: "move project X's time to Friday"), or "cancel" (remove a time: "cancel project X's time"). Pass the project's ref and a start_time; end_time is OPTIONAL — omit it when the user only gives a start (it defaults to one hour later / keeps the existing length). Only pass event_ref (the "time for Project N" event shown in EVENTS) if the project has more than one time. Do NOT use update_event/delete_event for a project's time — use project_time.
-- To answer "what do I have today / what's next / this week", call list_events AND list_tasks first, then answer from the results.
-- The calendar holds three kinds of items: plain calendar EVENTS, PROJECT EVENTS (events tied to a project — list_events marks these kind:"project_event"), and TASKS that have a due date ("task events"). When the user asks for "all my events" / "everything on my calendar", call BOTH list_events AND list_tasks and read back all three kinds, noting which events are project events.
-- To answer "what are my notes / tasks / events" (or "everything"), call list_tasks, list_events (use a wide range like the next 60 days), and search_notes with an empty query as needed, then read back EVERY item the user asked about — do not summarise or skip any.
-- To edit a note's text ("update/change Note 4 to ..."), use update_note and put the new wording in the "body" field — the body is the note's visible text. Do NOT use "title" unless the user literally says "title". To add a brand-new note, use create_note.
-- If the user says "cancel", "stop", "never mind", or "forget it" without a real request, do nothing and reply "Okay, cancelled." Do not call any tools.
-- If a question has MULTIPLE parts (e.g. "what's my task today and lunch on Monday"), make a separate tool call for each part with the correct date range, then answer every part. For a named weekday like "Monday", compute that specific date's range (00:00 to 23:59).
-- Recurring events only appear in list_events when the queried range covers an occurrence, so use the actual target date range, not just today.
-- When calling a tool, only include parameters you actually have a value for; omit the rest. Never put extra commentary in arguments.
-- After doing the work, reply in ONE short, natural spoken sentence, as concise as possible. It will be read aloud, so no markdown, lists, or IDs. Be brief even when reading items back — name them tersely, don't elaborate.
-- Never invent data. If a query returns nothing, say so plainly.`;
+// The CLOUD persona/rules now come from the SAME source as local: behavior.md in
+// the Obsidian vault, mirrored into the DB by the local instance (lib/behavior.ts +
+// syncBehaviorFile). So a single Obsidian edit changes both paths. CORE_PROMPT is
+// the built-in fallback used until the file has been synced at least once (and on a
+// DB read failure). Stable across turns → stays in the cacheable prompt prefix.
+// NOTE: behavior.md also carries LOCAL-only guidance (browser/app driving). The
+// cloud toolset has no browser_*/open_app, so the model simply can't act on those
+// lines; they're harmless context, not new capability.
+async function getCorePrompt(): Promise<string> {
+  return (await getBehavior()) || CORE_PROMPT;
+}
 
 // Strict routing means: when no ability/function keyword matched, we send NO
 // tools at all (no core toolset, no fuzzy fallback). The model replies naturally
@@ -386,15 +359,6 @@ function clarifyPrompt(label: string, options: string[]): string {
   } — or to phrase it with the keyword for that action. Do NOT pretend to do anything, and do NOT call any tools.`;
 }
 
-// Slim persona for pure-domain requests (music/email/open/search/messaging) that
-// don't touch tasks/events/notes — they don't need the big task/event/note
-// rulebook, just enough to drive the one domain tool. Saves ~1k tokens/request.
-const SLIM_CORE = `You are JARVIS, the user's personal assistant. Use the given tool(s) to do exactly what the user asked.
-Rules:
-- ALWAYS respond in English.
-- When a time is involved, convert 12-hour speech to 24-hour and include the ${TZ} offset.
-- Only include tool parameters you actually have a value for; never put extra commentary in arguments.
-- If the user says "cancel" / "never mind", do nothing.`;
 
 // Tiny prompt for the spoken-reply pass (replaces replaying the whole prompt+
 // tools just to phrase a sentence). Fed only the user's words + tool results.
@@ -432,19 +396,87 @@ function summarizeActions(actions: AgentResult["actions"]): string {
     .join("\n");
 }
 
-// A spoken reply built straight from tool results — used for deterministic
-// preset calls (no LLM) whose results already carry a clean `message`/`error`
-// (e.g. spotify_control "Paused.", play_spotify). Returns null when any result
-// isn't directly speakable (a pending action, or list data needing phrasing),
-// so those fall back to the cheap summary pass.
+// Deterministic counts sentence for the bulk complete/delete tools, e.g.
+// "Deleted 3 tasks and 1 event." Returns null when no count field was present.
+function countsMsg(r: any, verb: string, keys: [string, string][]): string | null {
+  const parts: string[] = [];
+  for (const [k, label] of keys) {
+    const n = r[k];
+    if (typeof n === "number") parts.push(`${n} ${label}${n === 1 ? "" : "s"}`);
+  }
+  return parts.length ? `${verb} ${parts.join(" and ")}.` : null;
+}
+
+// Phrase ONE tool result into a spoken sentence WITHOUT an LLM call. Used so a
+// single-intent turn (one write, no chaining) can answer with zero extra tokens
+// and no rate-limitable summary call. Returns null — falling back to the cheap
+// LLM summary pass — when the result is list/page DATA (needs reading aloud) or a
+// browser_*/read_site action (the model must phrase what it actually saw). Errors
+// and tools that already carry a clean `message` (spotify, messaging, …) speak
+// directly. Behaviour for lists/reads is unchanged: they still go to the summary.
+function speakAction(name: string, args: any, result: unknown): string | null {
+  if (name.startsWith("browser_") || name === "read_site") return null;
+  const r = result as any;
+  if (!r || typeof r !== "object") return null;
+  if (typeof r.message === "string" && r.message.trim()) return r.message.trim();
+  if (typeof r.error === "string" && r.error.trim()) return r.error.trim();
+  const title = String(r.title ?? args?.title ?? "").trim();
+  switch (name) {
+    case "create_task":
+      return title ? `Added task ${title}.` : "Added the task.";
+    case "update_task":
+      return r.done === true ? `Marked ${title || "the task"} done.` : title ? `Updated ${title}.` : "Updated the task.";
+    case "delete_task":
+      return r.deleted ? "Deleted that task." : null;
+    case "create_event":
+      return title ? `Added ${title} to your calendar.` : "Added the event.";
+    case "update_event":
+      return r.done === true ? `Marked ${title || "the event"} done.` : title ? `Updated ${title}.` : "Updated the event.";
+    case "delete_event":
+      return r.deleted ? "Deleted that event." : null;
+    case "create_note":
+      return "Saved your note.";
+    case "update_note":
+      return "Updated the note.";
+    case "delete_note":
+      return r.deleted ? "Deleted the note." : null;
+    case "create_project":
+      return title ? `Created project ${title}.` : "Created the project.";
+    case "add_subtask":
+      return title ? `Added subtask ${title}.` : "Added the subtask.";
+    case "update_subtask":
+      return "Updated the subtask.";
+    case "delete_subtask":
+      return r.deleted ? "Deleted the subtask." : null;
+    case "complete_all":
+      return countsMsg(r, "Completed", [
+        ["completed_tasks", "task"],
+        ["completed_events", "event"],
+        ["completed_projects", "project"],
+      ]);
+    case "delete_all":
+      return countsMsg(r, "Deleted", [
+        ["deleted_tasks", "task"],
+        ["deleted_events", "event"],
+        ["deleted_projects", "project"],
+        ["deleted_notes", "note"],
+      ]);
+    default:
+      return null; // lists/searches, project edits → summary pass phrases them
+  }
+}
+
+// A spoken reply built straight from tool results — no LLM. Used both for
+// deterministic preset calls and (now) for single-intent write turns. Returns
+// null when ANY action isn't directly speakable (a list, a page read, a browser
+// action, or a pending action), so those fall back to the cheap summary pass.
 function directReply(actions: AgentResult["actions"]): string | null {
   if (!actions.length) return null;
   const parts: string[] = [];
   for (const a of actions) {
-    const r = a.result as { message?: unknown; error?: unknown } | null;
-    if (r && typeof r.message === "string" && r.message.trim()) parts.push(r.message.trim());
-    else if (r && typeof r.error === "string" && r.error.trim()) parts.push(r.error.trim());
-    else return null; // pending action / list result — let the summary pass phrase it
+    const said = speakAction(a.name, a.args, a.result);
+    if (!said) return null;
+    parts.push(said);
   }
   return parts.join(" ");
 }
@@ -459,11 +491,12 @@ function fallbackReply(actions: AgentResult["actions"]): string {
   return "Done.";
 }
 
-// NOTE: the LOCAL-mode behavior rules (act-don't-announce, the two web paths,
-// open-app/open-url local actions, don't-repeat-a-tool-call, talk-like-a-human)
-// used to live here as RULES_LOCAL_AGENT / RULES_BROWSER_LOCAL. They now live in
-// the user-editable behavior.md, injected by lib/ollama-context.ts, so the user
-// can tune them in Obsidian. Cloud turns still use RULES_LOCAL below.
+// NOTE: all per-domain guidance (email/spotify/messaging/web/app) now lives in the
+// individual tool `description` fields in lib/tools.ts — the single source read by
+// BOTH cloud and local. Local-mode behavior (act-don't-announce, web/app paths,
+// talk-like-a-human) lives in the user-editable behavior.md (lib/ollama-context.ts).
+// Cloud turns prepend CORE_PROMPT (persona + GENERIC_RULES); local gets the same
+// generic rules via behavior.md.
 
 async function systemPrompt(opts: {
   text: string;
@@ -487,19 +520,11 @@ async function systemPrompt(opts: {
     timeStyle: "short",
   }).format(now);
 
-  // Domain rule blocks, only when relevant.
+  // Domain rules (email/spotify/messaging/web) now live in each tool's own
+  // `description` (lib/tools.ts), read by both cloud and local — so there are no
+  // per-group prompt blocks here anymore. The only block left is the DYNAMIC
+  // shell-folder hint, which depends on the user's runtime folder path.
   const blocks: string[] = [];
-  if (groups.has("email")) blocks.push(RULES_EMAIL);
-  // In LOCAL mode the act-now / web-access / local-action guidance comes from the
-  // user-editable behavior.md (see lib/ollama-context.ts), so we skip these
-  // hardcoded blocks there to avoid duplication. Cloud turns keep them.
-  if (
-    !opts.localBrowser &&
-    (groups.has("local") || groups.has("search") || groups.has("shell"))
-  )
-    blocks.push(RULES_LOCAL);
-  if (groups.has("spotify")) blocks.push(RULES_SPOTIFY);
-  if (groups.has("message")) blocks.push(RULES_MESSAGE);
   if (groups.has("shell")) {
     const base = (opts.userProfile || "").trim();
     if (base)
@@ -529,9 +554,14 @@ async function systemPrompt(opts: {
   const wantHistory = /\b(undo|restore|reopen|history|completed|delete)\b/i.test(text);
   const snapshot = wantSnapshot ? await buildSnapshot(wantHistory) : "";
 
-  // Static prefix first (cacheable), volatile context last. Pure-domain requests
-  // use the slim persona (no task/event/note rulebook).
-  const core = opts.slim ? SLIM_CORE : CORE_PROMPT;
+  // Static prefix first (cacheable), volatile context last. CLOUD turns prepend the
+  // generic CORE_PROMPT. LOCAL turns already get identity + the same GENERIC_RULES
+  // from behavior.md (prepended by the prep route), so we add no core here to avoid
+  // duplicating it — just the date line + snapshot below.
+  // Local turns get identity + rules from behavior.md (prepended by the prep
+  // route), so add no core here. Cloud turns pull the SAME behavior text from the
+  // DB (falling back to CORE_PROMPT until it's been synced).
+  const core = opts.localBrowser ? "" : await getCorePrompt();
   // The user's own "about me" facts — always read on cloud turns. (Local turns get
   // the same block via memory.md, so skip it here to avoid duplicating it.)
   const memoryBlock =
@@ -540,9 +570,14 @@ async function systemPrompt(opts: {
     timeZone: TZ,
     dateStyle: "full",
   }).format(new Date(now.getTime() + 86_400_000));
-  return `${core}${domain}${memoryBlock}
-
-Current date/time: ${localNow} (timezone ${TZ}). Today is ${localNow.split(",").slice(0, 2).join(",")}; TOMORROW is ${tomorrow}. The current ISO instant is ${now.toISOString()}. Resolve relative times ("tomorrow 7pm", "Friday") to full ISO 8601 WITH the ${TZ} offset (never "Z"/UTC). "Tomorrow" means ${tomorrow}, not today.${snapshot}`;
+  // Split static (byte-identical across turns) from volatile (date + snapshot).
+  // The cloud loop sends these as two separate system messages so the big static
+  // prefix (persona + GENERIC_RULES + memory) AND the ~5k-token tool schema form a
+  // stable prompt prefix the provider can cache; only the small date/snapshot tail
+  // re-bills each turn. Local concatenates them (no provider cache to court).
+  const system = `${core}${domain}${memoryBlock}`;
+  const context = `Current date/time: ${localNow} (timezone ${TZ}). Today is ${localNow.split(",").slice(0, 2).join(",")}; TOMORROW is ${tomorrow}. The current ISO instant is ${now.toISOString()}. Resolve relative times ("tomorrow 7pm", "Friday") to full ISO 8601 WITH the ${TZ} offset (never "Z"/UTC). "Tomorrow" means ${tomorrow}, not today.${snapshot}`;
+  return { system, context };
 }
 
 // The data snapshot is worth its tokens only when the request might touch
@@ -574,11 +609,8 @@ export type AgentResult = {
 // prefixes, so the first genuine request reuses them at a discount instead of
 // paying full freight cold. Fire-and-forget; failures are swallowed (a cold first
 // request is the worst case, not an error).
-//   • CORE_PROMPT (task/event/note/project requests) → top TWO non-exhausted
-//     models, so a daily-limit rotation still lands on a warm model.
-//   • SLIM_CORE (pure-domain: play/open/search/email/message) → ACTIVE model only
-//     (the one a request will actually use next), since it's the shorter prefix
-//     and warming both prefixes on two models each is overkill.
+// Warms the single generic CORE_PROMPT prefix on the top TWO non-exhausted models,
+// so a daily-limit rotation still lands on a warm model.
 export async function warmModels(): Promise<{ warmed: string[] }> {
   try {
     const { models: statuses, exhaustedIds } = await computeModelStatus();
@@ -597,14 +629,13 @@ export async function warmModels(): Promise<{ warmed: string[] }> {
         max_tokens: 1,
         temperature: 0,
       });
-    // CORE_PROMPT on the top two; SLIM_CORE on the active (first) model only.
-    const jobs = [
-      ...working.map((m) => ping(m, CORE_PROMPT)),
-      ...(working[0] ? [ping(working[0], SLIM_CORE)] : []),
-    ];
+    // Warm the ACTUAL cloud prefix (the synced behavior text, or CORE_PROMPT
+    // fallback) on the top two models, so the prompt cache primes the same bytes.
+    const core = await getCorePrompt();
+    const jobs = working.map((m) => ping(m, core));
     await Promise.allSettled(jobs);
     const warmed = working.map((m) => m.id);
-    console.log(`[agent] warmed models: [${warmed.join(", ") || "none"}] (+SLIM_CORE on active)`);
+    console.log(`[agent] warmed models: [${warmed.join(", ") || "none"}]`);
     return { warmed };
   } catch {
     return { warmed: [] };
@@ -774,6 +805,113 @@ async function readPageReply(
   return page.mode === "read" ? "I couldn't read that page back." : "I couldn't summarize that page.";
 }
 
+// Read an OpenAI-style SSE stream and call `emit` with CLEANED, complete sentences
+// as they form. <think> blocks are stripped on the fly (cleanReply drops a still-
+// open block, so nothing leaks while a reasoning model thinks); only text past the
+// last sentence boundary is held back until the next chunk. A final flush emits the
+// remainder. Sentence chunking gives the client natural TTS utterances.
+async function pumpSentences(res: Response, emit: (text: string) => void): Promise<void> {
+  const reader = res.body!.getReader();
+  const dec = new TextDecoder();
+  let carry = "";
+  let full = "";
+  let emittedLen = 0;
+
+  const flush = (final: boolean) => {
+    const cleaned = cleanReply(full);
+    let upto = cleaned.length;
+    if (!final) {
+      // Emit only through the LAST complete sentence boundary seen so far.
+      const m = cleaned.slice(emittedLen).match(/^[\s\S]*[.!?…]["')\]]?(?=\s)/);
+      if (!m) return;
+      upto = emittedLen + m[0].length;
+    }
+    const chunk = cleaned.slice(emittedLen, upto);
+    if (chunk.trim()) {
+      emit(chunk);
+      emittedLen = upto;
+    }
+  };
+
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    carry += dec.decode(value, { stream: true });
+    const lines = carry.split(/\r?\n/);
+    carry = lines.pop() ?? "";
+    for (const line of lines) {
+      if (!line.startsWith("data:")) continue;
+      const payload = line.slice(5).trim();
+      if (!payload || payload === "[DONE]") continue;
+      try {
+        const delta = JSON.parse(payload)?.choices?.[0]?.delta?.content;
+        if (typeof delta === "string" && delta) {
+          full += delta;
+          flush(false);
+        }
+      } catch {
+        /* keepalive / non-JSON chunk */
+      }
+    }
+  }
+  flush(true);
+}
+
+// Streaming page read/summarize: phrases the same read-back as readPageReply but
+// EMITS cleaned sentences as the model generates them, so the client can speak them
+// while generation continues. Prefers non-reasoning models (no <think> dump). Fails
+// over to the next model ONLY if nothing has been emitted yet — once a partial
+// answer is spoken, switching models would double-speak it. Token usage is recorded
+// by the router off a tee'd copy of the stream.
+export async function streamPageReply(
+  page: { content: string; title?: string; mode?: string },
+  emit: (text: string) => void
+): Promise<{ model: string }> {
+  const { order, exhausted } = await buildModelOrder();
+  const summaryOrder = [...order].sort(
+    (a, b) => (a.reasoning ? 1 : 0) - (b.reasoning ? 1 : 0)
+  );
+  const { sys, cap } = pagePrompt(page.mode ?? "summarize");
+  const messages = [
+    { role: "system", content: sys },
+    {
+      role: "user",
+      content: `Page title: ${page.title ?? ""}\n\nPage content:\n${page.content}`,
+    },
+  ];
+  let emitted = 0;
+  const emitOnce = (t: string) => {
+    emitted++;
+    emit(t);
+  };
+  let lastErr: unknown;
+  for (const model of summaryOrder) {
+    if (exhausted.has(model.id)) continue;
+    try {
+      const res = await createCompletionStream(model, {
+        messages,
+        temperature: 0.2,
+        max_tokens: Math.ceil(cap * 2),
+      });
+      await pumpSentences(res, emitOnce);
+      if (emitted > 0) return { model: model.id };
+      // Streamed OK but produced nothing — try the next model.
+    } catch (e) {
+      lastErr = e;
+      if (emitted > 0) break; // already spoke part — don't restart on another model
+    }
+  }
+  if (emitted === 0) {
+    if (lastErr) console.warn("[agent] streamPageReply: all models failed", lastErr);
+    emit(
+      (page.mode ?? "summarize") === "read"
+        ? "I couldn't read that page back."
+        : "I couldn't summarize that page."
+    );
+  }
+  return { model: summaryOrder[0]?.id ?? "" };
+}
+
 // The fully-resolved plan for one turn: which tools to send, the system prompt,
 // and the routing metadata. Shared by runAgent (cloud loop) and prepareTurn (the
 // client-driven LOCAL loop), so both route identically — only WHO runs the model
@@ -790,7 +928,8 @@ type TurnPlan = {
   slim: boolean;
   presetCalls: { name: string; args: any }[];
   onlyPreset: boolean;
-  systemContent: string;
+  systemContent: string; // STATIC system prefix (cacheable)
+  contextContent: string; // VOLATILE tail (date + data snapshot); "" when none
 };
 
 async function planTurn(
@@ -856,7 +995,6 @@ async function planTurn(
   // RULES_BROWSER_LOCAL. Only a pure clarify turn is left to ask.
   if (opts?.allTools && !clarify) {
     chat = false;
-    slim = false;
     multi = false;
     triggerKeyword = undefined;
     // Local toolset. The web-search tools (search_web / web_search) and the
@@ -874,35 +1012,47 @@ async function planTurn(
     } else {
       tools = toolDefs;
     }
-    groups = new Set<GroupKey>(ALL_GROUPS);
-    snapshotOverride = undefined; // let needsSnapshot decide
+    // The data snapshot follows the ENABLED tools: only attach it when a task/
+    // event/note/project tool is on. The persona + all per-tool rules now come from
+    // behavior.md (prepended by the prep route) + each tool's own schema, so there
+    // are no persona/rules files to seed here anymore.
+    const enabledNames = tools.map((d) => d.function.name);
+    const hasProd = hasProductivityTool(enabledNames);
+    groups = groupsForToolNames(enabledNames);
+    snapshotOverride = hasProd ? undefined : false; // off unless a task/event/note tool is on
     presetCalls = []; // the model drives every call now — no deterministic bypass
   }
 
   const onlyPreset = presetCalls.length > 0 && tools.length === 0 && !chat;
 
-  const systemContent = clarify
-    ? clarifyPrompt(clarify.label, clarify.options)
-    : chat
-    ? `${CHAT_PROMPT}\n\n${dateLine()}`
-    : onlyPreset
-    ? "" // no model tool pass — preset calls run directly below
-    : await systemPrompt({
-        text: userText,
-        groups,
-        userProfile: opts?.userProfile,
-        triggerKeyword,
-        multi,
-        // The user's "about me" facts (cloud injects here; local gets it via
-        // memory.md). Best-effort: a DB read failure just omits the block.
-        memory: opts?.allTools ? undefined : await getMemoryBlock(),
-        // Local all-tools mode → browser-first web access (no search tool).
-        localBrowser: opts?.allTools === true,
-        // Force the snapshot off when the user disabled it; otherwise keep the
-        // per-route decision (undefined => auto).
-        snapshotOverride: useSnapshot ? snapshotOverride : false,
-        slim,
-      });
+  let systemContent: string;
+  let contextContent = "";
+  if (clarify) {
+    systemContent = clarifyPrompt(clarify.label, clarify.options);
+  } else if (chat) {
+    systemContent = `${CHAT_PROMPT}\n\n${dateLine()}`;
+  } else if (onlyPreset) {
+    systemContent = ""; // no model tool pass — preset calls run directly below
+  } else {
+    const sp = await systemPrompt({
+      text: userText,
+      groups,
+      userProfile: opts?.userProfile,
+      triggerKeyword,
+      multi,
+      // The user's "about me" facts (cloud injects here; local gets it via
+      // memory.md). Best-effort: a DB read failure just omits the block.
+      memory: opts?.allTools ? undefined : await getMemoryBlock(),
+      // Local all-tools mode → browser-first web access (no search tool).
+      localBrowser: opts?.allTools === true,
+      // Force the snapshot off when the user disabled it; otherwise keep the
+      // per-route decision (undefined => auto).
+      snapshotOverride: useSnapshot ? snapshotOverride : false,
+      slim,
+    });
+    systemContent = sp.system;
+    contextContent = sp.context;
+  }
 
   return {
     routed: !chat,
@@ -920,6 +1070,7 @@ async function planTurn(
     presetCalls,
     onlyPreset,
     systemContent,
+    contextContent,
   };
 }
 
@@ -940,8 +1091,13 @@ export async function prepareTurn(
   routing: AgentResult["routing"];
 }> {
   const plan = await planTurn(userText, opts);
+  // Local runs on the user's own GPU — no provider cache to court — so fold the
+  // volatile context back into the single system string the client loop expects.
+  const system = [plan.systemContent, plan.contextContent]
+    .filter(Boolean)
+    .join("\n\n");
   return {
-    system: plan.systemContent,
+    system,
     tools: plan.tools,
     chat: plan.chat,
     onlyPreset: plan.onlyPreset,
@@ -968,6 +1124,16 @@ export async function runAgent(
   // page to save tokens; when off we never attach it (name-based edits get less
   // precise, but list/ref-based ones still work).
   const useSnapshot = opts?.useSnapshot !== false;
+  // Plan the turn and read model status concurrently — they're independent, so
+  // overlapping them shaves the snapshot DB reads off the critical path.
+  const [plan, status] = await Promise.all([
+    planTurn(userText, {
+      userProfile: opts?.userProfile,
+      useSnapshot,
+      enabledTools: opts?.enabledTools,
+    }),
+    computeModelStatus(),
+  ]);
   const {
     routed,
     groups,
@@ -980,23 +1146,23 @@ export async function runAgent(
     presetCalls,
     onlyPreset,
     systemContent,
-  } = await planTurn(userText, {
-    userProfile: opts?.userProfile,
-    useSnapshot,
-    enabledTools: opts?.enabledTools,
-  });
+    contextContent,
+  } = plan;
   void groups;
-  const messages: any[] = [
-    { role: "system", content: systemContent },
-    { role: "user", content: userText },
-  ];
+  void chat;
+  // Static system prefix + tools form the cacheable head; the volatile date/
+  // snapshot rides a SECOND system message so it doesn't poison the prefix cache.
+  const messages: any[] = [];
+  if (systemContent) messages.push({ role: "system", content: systemContent });
+  if (contextContent) messages.push({ role: "system", content: contextContent });
+  messages.push({ role: "user", content: userText });
 
   // Build the working fallback chain: only the user's ENABLED + available models,
   // in registry order (Gemini first). Pre-seed `exhausted` with models whose
   // daily quota is currently spent so we skip straight to the next one. If that
   // would leave nothing to try (everything looks exhausted), start fresh and let
   // them be re-attempted — a reset may have happened since we recorded it.
-  const { models: statuses, exhaustedIds } = await computeModelStatus();
+  const { models: statuses, exhaustedIds } = status;
   const working: ModelDef[] = statuses
     .filter((s) => s.enabled && s.available)
     .map((s) => modelById(s.id)!)
@@ -1138,7 +1304,9 @@ export async function runAgent(
         messages.push({
           role: "tool",
           tool_call_id: call.id,
-          content: JSON.stringify(result).slice(0, 4000),
+          // Cap the result fed back to the model — list rows rarely need more
+          // context than this, and it keeps the per-round prompt small.
+          content: JSON.stringify(result).slice(0, 2000),
         });
       }
 
@@ -1167,6 +1335,16 @@ export async function runAgent(
   // The model finished the tool loop with its own spoken answer (it already saw
   // every tool result) — use it directly and skip the extra summary call.
   if (finalReply) return { reply: clampWords(finalReply, maxWords), actions, ...meta() };
+
+  // Single-intent turns stop after the first tool batch with no model-authored
+  // reply. If EVERY action is deterministically speakable (writes/confirmations),
+  // say it straight from the results — zero extra LLM tokens and no rate-limitable
+  // summary call. Lists, page reads, and browser actions return null here and fall
+  // through to the cheap summary pass below, so their phrasing is unchanged.
+  {
+    const direct = directReply(actions);
+    if (direct) return { reply: clampWords(direct, maxWords), actions, ...meta() };
+  }
 
   // Pass 2 (cheap): phrase the spoken reply from a TINY prompt + the tool
   // results — instead of replaying the whole system prompt + tools just to get a

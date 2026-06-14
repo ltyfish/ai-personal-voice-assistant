@@ -26,8 +26,11 @@ export const LOCAL_TOOL_GROUPS: LocalToolGroup[] = [
   {
     key: "tasks",
     label: "Tasks",
-    hint: "Create, list, update, complete and delete to-dos.",
-    tools: ["create_task", "update_task", "delete_task", "complete_all", "list_tasks"],
+    hint: "Create, list, update, complete and delete to-dos and their subtasks.",
+    tools: [
+      "create_task", "update_task", "delete_task", "complete_all", "list_tasks",
+      "add_subtask", "update_subtask", "delete_subtask", "list_subtasks",
+    ],
   },
   {
     key: "events",

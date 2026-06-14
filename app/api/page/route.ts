@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { readPageText } from "@/lib/agent";
+import { readPageText, streamPageReply } from "@/lib/agent";
 import { addGroqUsage } from "@/lib/mail/blobs";
 
 export const runtime = "nodejs";
@@ -18,6 +18,36 @@ export async function POST(req: NextRequest) {
     const mode = body.mode === "read" ? "read" : "summarize";
     if (!content) {
       return NextResponse.json({ error: "no page content provided" }, { status: 400 });
+    }
+
+    // Streaming read-back: NDJSON lines — {"t": "<sentence> "} per chunk, then a
+    // final {"done": true, "model"}. The client speaks each sentence as it lands,
+    // so a long read starts talking almost immediately. Token usage is recorded by
+    // the router off the underlying model stream.
+    if (body.stream === true) {
+      const encoder = new TextEncoder();
+      const stream = new ReadableStream<Uint8Array>({
+        async start(controller) {
+          const send = (obj: unknown) =>
+            controller.enqueue(encoder.encode(JSON.stringify(obj) + "\n"));
+          try {
+            const { model } = await streamPageReply({ content, title, mode }, (t) =>
+              send({ t })
+            );
+            send({ done: true, model });
+          } catch (e: any) {
+            send({ error: e?.message || "page read failed" });
+          } finally {
+            controller.close();
+          }
+        },
+      });
+      return new Response(stream, {
+        headers: {
+          "Content-Type": "application/x-ndjson; charset=utf-8",
+          "Cache-Control": "no-cache, no-transform",
+        },
+      });
     }
 
     const { reply, usage, model } = await readPageText({ content, title, mode });

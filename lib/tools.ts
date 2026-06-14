@@ -1,5 +1,5 @@
 import { and, asc, desc, eq, gte, lte, ilike, or } from "drizzle-orm";
-import { db, tasks, events, notes, projects } from "@/db";
+import { db, tasks, subtasks, events, notes, projects } from "@/db";
 import { expandEvents } from "./recur";
 import { parseRef, refOf } from "./refs";
 import { listSummaries, setSummary, localDateKey } from "@/lib/mail/blobs";
@@ -95,6 +95,74 @@ export const toolDefs = [
   {
     type: "function" as const,
     function: {
+      name: "add_subtask",
+      description: "Add a subtask (checklist step) under an existing task. Identify the parent task by its short ref (e.g. 'Task 3') from CURRENT data, or by title. A subtask can carry its own due date/time and priority.",
+      parameters: {
+        type: "object",
+        properties: {
+          task_ref: { type: ["string", "null"], description: "parent task's short ref like 'Task 3'" },
+          task_title: { type: ["string", "null"], description: "parent task's title (when no ref)" },
+          title: { type: "string", description: "the subtask text" },
+          priority: { type: ["string", "null"], enum: ["low", "medium", "high", null] },
+          due_date: { type: ["string", "null"], description: "ISO 8601 datetime with offset, or null" },
+        },
+        required: ["title"],
+      },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
+      name: "update_subtask",
+      description: "Update a subtask under a task: rename it, mark it done, change its priority, or set/change its time. Identify the parent task by ref/title and the subtask by its current text.",
+      parameters: {
+        type: "object",
+        properties: {
+          task_ref: { type: ["string", "null"], description: "parent task's short ref like 'Task 3'" },
+          task_title: { type: ["string", "null"], description: "parent task's title (when no ref)" },
+          subtask_title: { type: "string", description: "text of the subtask to update" },
+          new_title: { type: ["string", "null"], description: "new text for the subtask" },
+          done: { type: ["boolean", "null"] },
+          priority: { type: ["string", "null"], enum: ["low", "medium", "high", null] },
+          due_date: { type: ["string", "null"], description: "ISO 8601 datetime with offset, or null to clear" },
+        },
+        required: ["subtask_title"],
+      },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
+      name: "delete_subtask",
+      description: "Delete a subtask from a task. Identify the parent task by ref/title and the subtask by its current text.",
+      parameters: {
+        type: "object",
+        properties: {
+          task_ref: { type: ["string", "null"], description: "parent task's short ref like 'Task 3'" },
+          task_title: { type: ["string", "null"], description: "parent task's title (when no ref)" },
+          subtask_title: { type: "string", description: "text of the subtask to delete" },
+        },
+        required: ["subtask_title"],
+      },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
+      name: "list_subtasks",
+      description: "List the subtasks under a task. Identify the task by its short ref (e.g. 'Task 3') or title.",
+      parameters: {
+        type: "object",
+        properties: {
+          task_ref: { type: ["string", "null"], description: "task's short ref like 'Task 3'" },
+          task_title: { type: ["string", "null"], description: "task's title (when no ref)" },
+        },
+      },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
       name: "create_event",
       description: "Create a timed calendar event. Supports recurrence for things like 'every Monday' (weekly), 'every day' (daily), or 'monthly'.",
       parameters: {
@@ -168,12 +236,13 @@ export const toolDefs = [
     type: "function" as const,
     function: {
       name: "create_note",
-      description: "Save a note / memo.",
+      description: "Save a note / memo. Optionally give it a date/time (it then shows on the calendar).",
       parameters: {
         type: "object",
         properties: {
           title: { type: "string" },
           body: { type: "string" },
+          date: { type: ["string", "null"], description: "ISO 8601 datetime with offset the note is about, or null. Set this when the user gives the note a time/date." },
         },
         required: ["body"],
       },
@@ -202,6 +271,7 @@ export const toolDefs = [
           query: { type: "string", description: "text to match the note by (when no ref)" },
           body: { type: "string", description: "the note's new full text (use this for 'change/update note to ...')" },
           title: { type: ["string", "null"], description: "ONLY when the user explicitly says 'title'; otherwise omit" },
+          date: { type: ["string", "null"], description: "ISO 8601 datetime with offset to (re)schedule the note, or null to clear its date. Set this for 'set/change the time of note ...'." },
         },
         required: ["body"],
       },
@@ -291,7 +361,7 @@ export const toolDefs = [
     function: {
       name: "update_project",
       description:
-        "Update a project: rename it, ADD an improvement note, EDIT an existing improvement, or REMOVE one. Prefer the short ref (e.g. 'Project 2') from CURRENT data; falls back to title match. Improvements are listed with a 1-based number in the snapshot — use that for edit/remove.",
+        "Update a project: rename it, ADD an improvement note, EDIT an existing improvement, REMOVE one, or SET A TIME on an improvement (set_improvement_time_number + improvement_time). Prefer the short ref (e.g. 'Project 2') from CURRENT data; falls back to title match. Improvements are listed with a 1-based number in the snapshot — use that for edit/remove/time.",
       parameters: {
         type: "object",
         properties: {
@@ -314,6 +384,14 @@ export const toolDefs = [
           remove_improvement_number: {
             type: ["number", "null"],
             description: "1-based number of the improvement to delete",
+          },
+          set_improvement_time_number: {
+            type: ["number", "null"],
+            description: "1-based number of the improvement to set/change a time for (use with improvement_time)",
+          },
+          improvement_time: {
+            type: ["string", "null"],
+            description: "ISO 8601 datetime with offset to schedule the improvement named by set_improvement_time_number, or null to clear its time",
           },
         },
       },
@@ -434,7 +512,7 @@ export const toolDefs = [
     function: {
       name: "fetch_emails_now",
       description:
-        "Poll Gmail now for NEW emails and summarize them. For 'fetch/check my email now', 'any new emails'. Returns only mail since the last fetch.",
+        "Poll Gmail now for NEW emails and summarize them. For 'fetch/check my email now', 'any new emails'. Returns only mail since the last fetch; if new_emails is 0, say plainly 'No new emails.' For a DIGEST/SUMMARY ('what's my digest', 'today's emails'), call this AND list_emails(today_only=true) together in the same turn — fetch first, then read the result.",
       parameters: { type: "object", properties: {} },
     },
   },
@@ -841,6 +919,7 @@ export const CLOUD_TOOLS = toolDefs.filter(
 // strong, unambiguous keywords. Falls open (includes a group) on any match.
 const CORE_TOOLS = new Set([
   "create_task", "update_task", "delete_task", "complete_all", "list_tasks",
+  "add_subtask", "update_subtask", "delete_subtask", "list_subtasks",
   "create_event", "update_event", "delete_event", "list_events",
   "create_note", "search_notes", "update_note", "delete_note",
   "create_project", "list_projects", "update_project", "delete_project", "project_time",
@@ -917,6 +996,26 @@ export function selectTools(userText: string, groups = activeGroups(userText)) {
   return toolDefs.filter((d) => names.has(d.function.name));
 }
 
+// Map a set of tool NAMES to the domain groups they belong to. Used by the LOCAL
+// path so the system prompt carries ONLY the rule blocks for tools that are
+// actually enabled in the deck's tool picker (browser-only => no email/spotify/
+// task rules). Browser tools belong to no domain group — their guidance lives in
+// behavior.md — so a browser-only set yields an empty group set on purpose.
+export function groupsForToolNames(names: Iterable<string>): Set<GroupKey> {
+  const want = new Set(names);
+  const out = new Set<GroupKey>();
+  for (const g of TOOL_GROUPS) if (g.tools.some((t) => want.has(t))) out.add(g.key);
+  return out;
+}
+
+// Does this tool set include any CORE productivity tool (tasks/events/notes/
+// projects)? When it doesn't, the LOCAL prompt drops the big task/event/note
+// rulebook (CORE_PROMPT) for the slim persona and skips the data snapshot.
+export function hasProductivityTool(names: Iterable<string>): boolean {
+  for (const n of names) if (CORE_TOOLS.has(n)) return true;
+  return false;
+}
+
 // Return exactly the named tools, in registry order. Used by the keyword router
 // to send only an ability's own tools (a much smaller request than selectTools).
 export function toolsByNames(names: string[]) {
@@ -971,6 +1070,25 @@ async function resolveTaskId(args: Args): Promise<string | null> {
     .from(tasks)
     .where(ilike(tasks.title, `%${t}%`))
     .orderBy(asc(tasks.done), desc(tasks.createdAt))
+    .limit(1);
+  return rows[0]?.id ?? null;
+}
+
+// Resolve a subtask: find the parent task (by task_ref/task_title), then match a
+// subtask within it by its current text. Prefers open subtasks, then newest.
+async function resolveSubtaskId(args: Args): Promise<string | null> {
+  const taskId = await resolveTaskId({ ref: args.task_ref, title: args.task_title });
+  if (!taskId) return null;
+  const q = (args.subtask_title ?? "").trim();
+  const rows = await db
+    .select({ id: subtasks.id })
+    .from(subtasks)
+    .where(
+      q
+        ? and(eq(subtasks.taskId, taskId), ilike(subtasks.title, `%${q}%`))
+        : eq(subtasks.taskId, taskId)
+    )
+    .orderBy(asc(subtasks.done), desc(subtasks.createdAt))
     .limit(1);
   return rows[0]?.id ?? null;
 }
@@ -1120,6 +1238,54 @@ async function execTool(name: string, args: Args): Promise<unknown> {
         .orderBy(asc(tasks.dueDate));
       return rows;
     }
+    case "add_subtask": {
+      const taskId = await resolveTaskId({ ref: args.task_ref, title: args.task_title });
+      if (!taskId) return { error: "no matching parent task found" };
+      const title = (args.title ?? "").trim();
+      if (!title) return { error: "no subtask title given" };
+      const [row] = await db
+        .insert(subtasks)
+        .values({
+          taskId,
+          title,
+          priority: args.priority ?? "medium",
+          dueDate: args.due_date ? new Date(args.due_date) : null,
+        })
+        .returning();
+      return row;
+    }
+    case "update_subtask": {
+      const id = await resolveSubtaskId(args);
+      if (!id) return { error: "no matching subtask found" };
+      const patch: Args = {};
+      if (args.new_title !== undefined && args.new_title !== null) patch.title = args.new_title;
+      if (args.done !== undefined && args.done !== null) patch.done = args.done;
+      if (args.priority !== undefined && args.priority !== null) patch.priority = args.priority;
+      if (args.due_date !== undefined)
+        patch.dueDate = args.due_date ? new Date(args.due_date) : null;
+      const [row] = await db
+        .update(subtasks)
+        .set(patch)
+        .where(eq(subtasks.id, id))
+        .returning();
+      return row ?? { error: "subtask not found" };
+    }
+    case "delete_subtask": {
+      const id = await resolveSubtaskId(args);
+      if (!id) return { error: "no matching subtask found" };
+      const [row] = await db.delete(subtasks).where(eq(subtasks.id, id)).returning();
+      return row ? { deleted: true } : { error: "subtask not found" };
+    }
+    case "list_subtasks": {
+      const taskId = await resolveTaskId({ ref: args.task_ref, title: args.task_title });
+      if (!taskId) return { error: "no matching task found" };
+      const rows = await db
+        .select()
+        .from(subtasks)
+        .where(eq(subtasks.taskId, taskId))
+        .orderBy(asc(subtasks.createdAt));
+      return rows;
+    }
     case "delete_all": {
       const target = args.target ?? "all";
       const status = args.status ?? "all"; // all | completed | open
@@ -1239,7 +1405,11 @@ async function execTool(name: string, args: Args): Promise<unknown> {
     case "create_note": {
       const [row] = await db
         .insert(notes)
-        .values({ title: args.title ?? null, body: args.body })
+        .values({
+          title: args.title ?? null,
+          body: args.body,
+          date: args.date ? new Date(args.date) : null,
+        })
         .returning();
       return row;
     }
@@ -1263,6 +1433,7 @@ async function execTool(name: string, args: Args): Promise<unknown> {
       const patch: Args = { updatedAt: new Date() };
       if (args.title !== undefined) patch.title = args.title;
       if (args.body !== undefined) patch.body = args.body;
+      if (args.date !== undefined) patch.date = args.date ? new Date(args.date) : null;
       const [row] = await db
         .update(notes)
         .set(patch)
@@ -1329,21 +1500,44 @@ async function execTool(name: string, args: Args): Promise<unknown> {
         patch.title = args.new_title;
       if (args.done !== undefined && args.done !== null) patch.done = args.done;
       let improvements = [...(row.improvements ?? [])];
+      // Times are keyed by improvement TEXT, so keep the map in sync as text
+      // changes/removes happen.
+      const times: Record<string, string> = { ...(row.improvementTimes ?? {}) };
       if (typeof args.edit_improvement_number === "number") {
         const idx = args.edit_improvement_number - 1;
         if (idx < 0 || idx >= improvements.length)
           return { error: `project has no improvement #${args.edit_improvement_number}` };
-        if (args.edit_improvement_text)
-          improvements[idx] = String(args.edit_improvement_text);
+        if (args.edit_improvement_text) {
+          const oldText = improvements[idx];
+          const newText = String(args.edit_improvement_text);
+          improvements[idx] = newText;
+          if (times[oldText] !== undefined && newText !== oldText) {
+            times[newText] = times[oldText];
+            delete times[oldText];
+          }
+        }
       }
       if (typeof args.remove_improvement_number === "number") {
         const idx = args.remove_improvement_number - 1;
         if (idx < 0 || idx >= improvements.length)
           return { error: `project has no improvement #${args.remove_improvement_number}` };
-        improvements.splice(idx, 1);
+        const [removed] = improvements.splice(idx, 1);
+        if (removed !== undefined) delete times[removed];
+      }
+      if (typeof args.set_improvement_time_number === "number") {
+        const idx = args.set_improvement_time_number - 1;
+        if (idx < 0 || idx >= improvements.length)
+          return { error: `project has no improvement #${args.set_improvement_time_number}` };
+        const text = improvements[idx];
+        if (args.improvement_time) {
+          times[text] = new Date(String(args.improvement_time)).toISOString();
+        } else {
+          delete times[text];
+        }
       }
       if (args.add_improvement) improvements.push(String(args.add_improvement));
       patch.improvements = improvements;
+      patch.improvementTimes = times;
       const [updated] = await db
         .update(projects)
         .set(patch)

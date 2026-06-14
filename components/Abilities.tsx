@@ -130,6 +130,70 @@ export default function Abilities() {
       <LoginsCard />
       <StartupCard />
       <NotesCard />
+      <BehaviorSyncCard bridge={bridge} />
+    </div>
+  );
+}
+
+// BEHAVIOR SYNC — JARVIS's persona/rules live in behavior.md in your Obsidian vault
+// and drive the LOCAL path live. The CLOUD path reads a copy mirrored into the DB;
+// that copy only refreshes on a local turn (cloud can't read your vault). This
+// button pushes the current behavior.md to the cloud on demand, so an edit takes
+// effect in the cloud without waiting for the next local turn.
+function BehaviorSyncCard({ bridge }: { bridge: boolean }) {
+  const [state, setState] = useState<"idle" | "syncing" | "ok" | "skip" | "err">("idle");
+
+  const sync = async () => {
+    setState("syncing");
+    try {
+      const res = await fetch("/api/behavior", { method: "POST" });
+      const d = await res.json().catch(() => ({}));
+      setState(d?.synced ? "ok" : "skip");
+    } catch {
+      setState("err");
+    }
+  };
+
+  const msg =
+    state === "ok"
+      ? "Synced — the cloud now uses your latest behavior.md."
+      : state === "skip"
+      ? "No local behavior.md found. Run this from the Jarvis app on your own computer (the cloud can't read your vault)."
+      : state === "err"
+      ? "Sync failed — try again."
+      : "";
+
+  return (
+    <div className="a-card" style={{ marginTop: "1rem" }}>
+      <div className="a-card-inner">
+        <h2 style={{ fontSize: ".95rem" }}>🔄 Behavior sync</h2>
+        <p style={{ color: "var(--t2)", marginTop: ".25rem", fontSize: ".82rem", marginBottom: ".5rem" }}>
+          Jarvis's persona &amp; rules live in <b style={{ color: "var(--t1)" }}>behavior.md</b> in your
+          Obsidian vault. Edits drive local turns instantly; the <b style={{ color: "var(--t1)" }}>cloud</b>{" "}
+          uses a synced copy that refreshes on each local turn. Hit sync to push your latest edit to the
+          cloud now.
+        </p>
+        <div style={{ display: "flex", alignItems: "center", gap: ".6rem", flexWrap: "wrap" }}>
+          <button className="a-btn" onClick={sync} disabled={state === "syncing"}>
+            {state === "syncing" ? "Syncing…" : "Sync behavior to cloud"}
+          </button>
+          {msg && (
+            <span
+              style={{
+                fontSize: ".78rem",
+                color: state === "ok" ? "var(--a)" : state === "err" ? "var(--u4c, #f97316)" : "var(--t2)",
+              }}
+            >
+              {msg}
+            </span>
+          )}
+        </div>
+        {!bridge && (
+          <p style={{ color: "var(--t3, var(--t2))", fontSize: ".75rem", marginTop: ".5rem", marginBottom: 0 }}>
+            Your computer isn’t connected right now — sync works when you’re running the Jarvis app locally.
+          </p>
+        )}
+      </div>
     </div>
   );
 }

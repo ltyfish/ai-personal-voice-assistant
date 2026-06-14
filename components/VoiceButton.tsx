@@ -370,6 +370,93 @@ export default function VoiceButton({ onDone }: { onDone: () => void }) {
     }
   }
 
+  // A streaming speaker: push sentences as they arrive and they're QUEUED into
+  // speechSynthesis (which plays utterances back-to-back), so a long read starts
+  // talking on the first sentence instead of waiting for the whole text. Call
+  // finish() once the source stream ends; onAllDone fires after the queue drains.
+  function makeStreamSpeaker(onAllDone: () => void) {
+    const synth = typeof window !== "undefined" ? window.speechSynthesis : null;
+    let enqueued = 0;
+    let ended = 0;
+    let streamDone = false;
+    let started = false;
+    let finished = false;
+    const clearHeartbeat = () => {
+      if (ttsHeartbeatRef.current) {
+        clearInterval(ttsHeartbeatRef.current);
+        ttsHeartbeatRef.current = null;
+      }
+    };
+    const finalize = () => {
+      if (finished) return;
+      finished = true;
+      clearHeartbeat();
+      setSpeaking(false);
+      onAllDone();
+    };
+    const maybeFinish = () => {
+      if (streamDone && ended >= enqueued) finalize();
+    };
+    if (!synth) {
+      // No TTS — degrade to "speak nothing, just finish when the stream ends".
+      return {
+        push: (_: string) => {},
+        finish: () => finalize(),
+      };
+    }
+    return {
+      push(sentence: string) {
+        if (!sentence.trim()) return;
+        if (!started) {
+          started = true;
+          synth.cancel(); // clear any prior utterance once, before the first chunk
+        }
+        const u = new SpeechSynthesisUtterance(sentence);
+        u.lang = "en-US";
+        u.rate = speechRateRef.current || 1.05;
+        const all = synth.getVoices();
+        const chosen =
+          all.find((v) => v.voiceURI === voiceURIRef.current) ||
+          all.find((v) => v.lang?.toLowerCase().startsWith("en"));
+        if (chosen) {
+          u.voice = chosen;
+          u.lang = chosen.lang;
+        }
+        u.onstart = () => setSpeaking(true);
+        const done = () => {
+          ended++;
+          maybeFinish();
+        };
+        u.onend = done;
+        u.onerror = done;
+        enqueued++;
+        // Small defer on the FIRST utterance only (the Chrome cancel()->speak()
+        // same-tick drop bug); subsequent ones queue immediately.
+        const fire = () => {
+          try {
+            synth.resume();
+            synth.speak(u);
+            if (!ttsHeartbeatRef.current) {
+              ttsHeartbeatRef.current = setInterval(() => {
+                if (synth.speaking) synth.resume();
+                else clearHeartbeat();
+              }, 8000);
+            }
+          } catch {
+            done();
+          }
+        };
+        if (enqueued === 1) setTimeout(fire, 60);
+        else fire();
+      },
+      finish() {
+        streamDone = true;
+        if (enqueued === 0) finalize();
+        else maybeFinish();
+      },
+    };
+  }
+
   // Immediately silence Jarvis (cancel any queued/active TTS).
   function stopSpeaking() {
     if (ttsHeartbeatRef.current) {
@@ -984,11 +1071,83 @@ export default function VoiceButton({ onDone }: { onDone: () => void }) {
     }
   }
 
-  // Read the current page and speak it (single-shot read/summarize).
+  // Read the current page and speak it (single-shot read/summarize), STREAMING the
+  // spoken reply so it starts talking on the first sentence. Falls back to the
+  // one-shot path if the stream can't be opened.
   async function readCurrentPage(mode: "summarize" | "read", label: string) {
     setReply(`Reading ${label || "the page"}…`);
     setStatusBoth("thinking");
-    finishBrowser(await readCurrentToText(mode));
+    const t = await pageText();
+    if (!t.ok || !t.content) {
+      finishBrowser(t.error || "I couldn't read that page.");
+      return;
+    }
+    // End the browser turn WITHOUT speaking (the stream speaker handles speech).
+    const finalize = () => {
+      pendingBrowserRef.current = null;
+      browserInstructionRef.current = null;
+      autonomousBrowserRef.current = false;
+      setPendingBrowser(null);
+      setStatusBoth("idle");
+      engineRef.current?.resume();
+      continueLiveSession();
+    };
+    let full = "";
+    let speaker: ReturnType<typeof makeStreamSpeaker> | null = null;
+    try {
+      const res = await fetch("/api/page", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ content: t.content, title: t.title, mode, stream: true }),
+      });
+      if (!res.ok || !res.body) {
+        // Stream unavailable — fall back to the one-shot read.
+        const data = await res.json().catch(() => ({} as any));
+        finishBrowser(data.reply || data.error || "I couldn't summarize that page.");
+        return;
+      }
+      speaker = makeStreamSpeaker(finalize);
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buf = "";
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+        const lines = buf.split("\n");
+        buf = lines.pop() ?? "";
+        for (const line of lines) {
+          if (!line.trim()) continue;
+          let obj: any;
+          try {
+            obj = JSON.parse(line);
+          } catch {
+            continue;
+          }
+          if (typeof obj.t === "string") {
+            full += obj.t;
+            setReply(full);
+            speaker.push(obj.t);
+          } else if (obj.error && !full) {
+            // Errored before any text — surface it the normal way.
+            finishBrowser(obj.error);
+            return;
+          }
+        }
+      }
+      if (!full.trim()) {
+        finishBrowser("I couldn't summarize that page.");
+        return;
+      }
+      speaker.finish();
+    } catch {
+      if (full.trim() && speaker) {
+        // We already spoke part of it — drain the queue, then finalize normally.
+        speaker.finish();
+      } else {
+        finishBrowser("I couldn't reach the summarizer.");
+      }
+    }
   }
 
   const isReadStep = (s?: string) => !!s && /^(summari[sz]e|read)\b/i.test(s.trim());

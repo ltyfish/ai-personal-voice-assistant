@@ -24,10 +24,10 @@ import {
 import { join } from "node:path";
 import { toolDefs } from "./tools";
 import { getMemory, renderMemoryMarkdown } from "./memory";
+import { saveBehavior } from "./behavior";
 
 const DIR =
   process.env.OLLAMA_DIR || "C:\\Users\\User\\Downloads\\Projects\\Ollama";
-const SOUL = join(DIR, "soul.md");
 const MEMORY = join(DIR, "memory.md");
 const DECISION = join(DIR, "decision.md");
 const BEHAVIOR = join(DIR, "behavior.md");
@@ -44,7 +44,6 @@ const ACTIVITY_INJECT_LINES = 5;
 // decision.md is a rolling log; keep only the most recent slice in the file.
 const DECISION_CAP = 14000;
 // How much of each file to inject into the prompt (keep the prompt lean).
-const SOUL_INJECT = 4000;
 const MEMORY_INJECT = 3500;
 
 function read(path: string): string {
@@ -53,6 +52,25 @@ function read(path: string): string {
   } catch {
     return "";
   }
+}
+
+// Seed-then-read a user-editable prompt file in the Ollama/Obsidian folder. On
+// first run the file is written with `seed` (so it shows up in Obsidian and the
+// user can tune it); after that the FILE is the source of truth. Best-effort: if
+// the file can't be written (e.g. the cloud deploy where DIR doesn't exist) the
+// seed is returned unchanged, so behavior is identical to using the constant.
+// `name` is a bare filename under DIR (e.g. "persona-core.md").
+export function fileBacked(name: string, seed: string): string {
+  const path = join(DIR, name);
+  const existing = read(path).trim();
+  if (existing) return existing;
+  ensureDir();
+  try {
+    writeFileSync(path, seed);
+  } catch {
+    /* best-effort — fall back to the seed in memory */
+  }
+  return seed;
 }
 
 function ensureDir() {
@@ -70,11 +88,25 @@ function tail(s: string, n: number): string {
 // The DEFAULT "how you act" rules. This is seeded into behavior.md the first time
 // (so the user can edit it in Obsidian); after that we always read the file. Keep
 // the seed in sync if you change defaults, but the file is the source of truth.
-const DEFAULT_BEHAVIOR = `# How you act
+// The few CROSS-CUTTING rules no single tool schema can state (orchestration,
+// don't-invent, output style). Shared by the cloud CORE_PROMPT (lib/agent.ts) and
+// the local behavior.md default below, so both paths read one source. Everything
+// tool-SPECIFIC (refs, done=true, email digest, spotify, messaging…) lives in each
+// tool's own `description` in lib/tools.ts, not here.
+export const GENERIC_RULES = `- ALWAYS reply in English, whatever language the user spoke.
+- Make EVERY tool call the request needs in ONE turn (you may emit several at once); never wait for one result before making the next call.
+- For "what do I have / what's on today / this week / everything", call list_events AND list_tasks (and search_notes when notes are involved) over the right date range, then answer from the results.
+- A recurring request ("every Monday", "daily", "monthly") sets the event's recurrence with the start on the correct FIRST occurrence.
+- Never invent tasks, events, refs, or results — if a query returns nothing, say so plainly.
+- After doing the work, reply in ONE short, natural spoken sentence — no markdown, lists, or IDs (it's read aloud).`;
 
-> This file is **yours to edit** in Obsidian. It is injected into the local model
-> on every turn and controls how it behaves and talks. Edits take effect on your
-> next message. Delete the file to regenerate these defaults.
+const DEFAULT_BEHAVIOR = `# JARVIS — who you are and how you act
+
+> This file is **yours to edit** in Obsidian. It sets JARVIS's identity AND its
+> behavior, and is injected near the top of every local turn. Edits take effect on
+> your next message. Delete the file to regenerate these defaults.
+
+You are JARVIS, the user's personal AI assistant — warm, sharp, and unflappable, a capable right hand, not a chirpy chatbot. Your replies are read aloud, so you speak in short, natural spoken sentences, get to the point, and never narrate what you're "about to" do — you just do it and tell the user the result.
 
 You ALWAYS have your full toolbox available — every tool, every turn. The rule is: ACT, don't announce.
 
@@ -87,7 +119,11 @@ You ALWAYS have your full toolbox available — every tool, every turn. The rule
 - OPENING AN APP OR FOLDER on the computer: use open_app ONLY with a real app or folder NAME — "open Spotify", "open Discord", "open my chip folder" (drop the word "folder"). It pops the app/folder onto the user's screen and asks them to confirm, so reply naturally like "Sure, I'll open Discord if you confirm." NEVER pass a URL or web address to open_app, and never use it to research or answer a question.
 - OPENING A URL / WEBSITE / PAGE (anything starting with http, a domain like console.neon.tech, or "open the X website / X in the browser"): this is the controlled browser's job — call browser_open(url). Do NOT use open_app for URLs. After it opens you can browser_snapshot / browser_scroll / browser_read / browser_act on the page.
 
-You may keep a brief WHY in a <think>…</think> block (it is recorded, not spoken), but the think block is OPTIONAL and must never replace the tool call — act in the same reply.`;
+You may keep a brief WHY in a <think>…</think> block (it is recorded, not spoken), but the think block is OPTIONAL and must never replace the tool call — act in the same reply.
+
+## Ground rules
+
+${GENERIC_RULES}`;
 
 const TOOL_PICKER_OVERRIDE = `# Runtime tool availability
 
@@ -108,16 +144,35 @@ function readBehavior(): string {
   return DEFAULT_BEHAVIOR;
 }
 
+// Push the vault's behavior.md into the cloud DB so the CLOUD path reads the same
+// rules (it can't see the local vault). Only the LOCAL instance — which actually
+// owns the file — does this; on the cloud deploy BEHAVIOR doesn't exist, so we
+// skip rather than clobber a good stored prompt with the in-memory default. Run
+// once per local turn from the prep route, mirroring syncMemoryFile(). Best-effort.
+export async function syncBehaviorFile(): Promise<boolean> {
+  try {
+    // Seed the file on first local run so Obsidian shows it, THEN push it.
+    if (!existsSync(BEHAVIOR)) readBehavior();
+    if (!existsSync(BEHAVIOR)) return false; // cloud (no vault) — nothing to push
+    const text = read(BEHAVIOR).trim();
+    if (!text) return false;
+    await saveBehavior(text);
+    return true;
+  } catch {
+    /* best-effort — local edits just won't reach cloud until next successful sync */
+    return false;
+  }
+}
+
 // Build the system-prompt block injected into every local turn. Always present
 // (so the model is told to reason before acting), even if the files are empty.
 export function readOllamaContext(): string {
-  const soul = read(SOUL).trim();
+  // soul + behavior are merged: identity now lives at the top of behavior.md.
   // memory.md is the synced "about me" facts (written by syncMemoryFile before
   // this runs). It carries its own "# About me" heading, so inject it verbatim.
   const memory = read(MEMORY).trim();
 
   const parts: string[] = [];
-  if (soul) parts.push(`## Who you are (soul)\n${tail(soul, SOUL_INJECT)}`);
 
   // The behavior rules live in behavior.md (user-editable in Obsidian, seeded
   // with DEFAULT_BEHAVIOR on first run), so they read live like the other files.
@@ -206,8 +261,17 @@ export function writeToolSchema(enabledNames: string[]) {
     lines.push(`## ${on ? "✅" : "⬜"} \`${f.name}\``);
     if (f.description) lines.push(f.description);
     const props = f.parameters?.properties || {};
+    const required = new Set<string>(Array.isArray(f.parameters?.required) ? f.parameters.required : []);
     const keys = Object.keys(props);
-    if (keys.length) lines.push("", `Params: ${keys.join(", ")}`);
+    if (keys.length) {
+      lines.push("", "Params:");
+      for (const k of keys) {
+        const p = props[k] || {};
+        const req = required.has(k) ? " _(required)_" : "";
+        const desc = p.description ? ` — ${p.description}` : "";
+        lines.push(`- \`${k}\`${req}${desc}`);
+      }
+    }
     lines.push("");
   }
   const body = lines.join("\n");

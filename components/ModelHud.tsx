@@ -84,6 +84,10 @@ export default function ModelHud() {
   const [rows, setRows] = useState<Row[]>([]);
   const [paused, setPaused] = useState(false);
   const sinceRef = useRef(0);
+  // Events with id <= this are discarded — set on clear so an in-flight poll
+  // (started before the clear, returning pre-clear events) can't re-populate the
+  // feed after we've emptied it.
+  const minIdRef = useRef(0);
   const pausedRef = useRef(false);
   useEffect(() => {
     pausedRef.current = paused;
@@ -126,6 +130,7 @@ export default function ModelHud() {
     setRows((prev) => {
       const next = prev.slice();
       for (const e of events) {
+        if (e.id <= minIdRef.current) continue; // dropped by a clear
         if (e.kind === "tokens") {
           const idx = findPendingServed(next, e.model, e.key);
           if (idx >= 0) {
@@ -149,11 +154,17 @@ export default function ModelHud() {
   }
 
   async function clearFeed() {
+    // Drop everything seen so far, then ignore any pre-clear events still in
+    // flight from a poll that started before this click.
+    minIdRef.current = sinceRef.current;
     setRows([]);
     try {
       const res = await fetch(`/api/router-feed`, { method: "DELETE", cache: "no-store" });
       const data = await res.json().catch(() => ({}));
-      if (typeof data?.lastId === "number") sinceRef.current = data.lastId;
+      if (typeof data?.lastId === "number") {
+        sinceRef.current = data.lastId;
+        minIdRef.current = data.lastId;
+      }
     } catch {
       /* local clear already happened */
     }

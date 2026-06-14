@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prepareTurn } from "@/lib/agent";
-import { readOllamaContext, writeToolSchema, syncMemoryFile } from "@/lib/ollama-context";
+import { readOllamaContext, writeToolSchema, syncMemoryFile, syncBehaviorFile } from "@/lib/ollama-context";
 
 export const runtime = "nodejs";
 export const maxDuration = 30;
@@ -28,7 +28,9 @@ export async function POST(req: NextRequest) {
     // Mirror the "about me" memory (cloud DB) into memory.md first, then inject
     // the local assistant's soul + memory + recent activity (only the local server
     // can read these files). Prepended so persona+memory frame the whole turn.
-    await syncMemoryFile();
+    // Mirror "about me" (DB→file) and push the vault's behavior.md (file→DB) so the
+    // cloud path reads the SAME rules. Both best-effort; run concurrently.
+    await Promise.all([syncMemoryFile(), syncBehaviorFile()]);
     const ctx = readOllamaContext();
     if (ctx) prep.system = `${ctx}\n\n${prep.system}`;
     // Expose the live tool schema in Obsidian: exactly the tools sent this turn

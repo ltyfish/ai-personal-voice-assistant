@@ -277,18 +277,10 @@ async function filterAvailableModels(candidates: string[]): Promise<string[]> {
     if (!parsed) continue;
     const cd = await getModelCooldown(parsed.platform, parsed.upstreamModel);
     if (cd) {
-      const fullModel = candidate;
-      pushRouterEvent({
-        kind: "cooldown",
-        model: fullModel,
-        detail: `model cooldown until ${cd.until.toLocaleTimeString("en-SG", { hour12: false })}`,
-      });
-      appendRouterCooldownLog({
-        kind: "model_skip",
-        model: fullModel,
-        detail: `model cooldown skip: ${cd.detail}`,
-        cooldownMs: Math.max(1, cd.until.getTime() - Date.now()),
-      });
+      // Proactively skipped — stay SILENT. Emitting a feed/vault event for every
+      // already-cooled model on every request floods the rotation log and makes
+      // it look like the router is still trying cooled models when it isn't.
+      // Cooldowns are only surfaced when a model actually fails (in routeOne).
       continue;
     }
     out.push(candidate);

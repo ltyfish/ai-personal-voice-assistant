@@ -59,6 +59,9 @@ export default function RouterFeed() {
   const [rows, setRows] = useState<Row[]>([]);
   const [live, setLive] = useState(true);
   const sinceRef = useRef(0);
+  // Events with id <= this are discarded — set on clear so an in-flight poll
+  // can't re-populate the feed with pre-clear events after we empty it.
+  const minIdRef = useRef(0);
   const liveRef = useRef(true);
 
   useEffect(() => {
@@ -96,6 +99,7 @@ export default function RouterFeed() {
     setRows((prev) => {
       const next = prev.slice();
       for (const e of events) {
+        if (e.id <= minIdRef.current) continue; // dropped by a clear
         if (e.kind === "tokens") {
           const idx = findPendingServed(next, e.model, e.key);
           if (idx >= 0) {
@@ -122,11 +126,15 @@ export default function RouterFeed() {
   }
 
   async function clearFeed() {
+    minIdRef.current = sinceRef.current;
     setRows([]);
     try {
       const res = await fetch(`/api/router-feed`, { method: "DELETE", cache: "no-store" });
       const data = await res.json().catch(() => ({}));
-      if (typeof data?.lastId === "number") sinceRef.current = data.lastId;
+      if (typeof data?.lastId === "number") {
+        sinceRef.current = data.lastId;
+        minIdRef.current = data.lastId;
+      }
     } catch {
       /* local clear already happened */
     }

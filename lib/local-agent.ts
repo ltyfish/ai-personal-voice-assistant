@@ -179,40 +179,6 @@ export async function routerChat(
   }
 }
 
-// Hermes runs its inference through JARVIS's OWN rotating router (/api/v1), and
-// that proxy emits a "tokens" event per upstream call into the router-feed ring
-// (lib/router-feed.ts). `hermes -z` never reports usage back to us, so to make
-// the HUD's token count work for a LOCAL turn we sum the token events that landed
-// during the turn's time window and attribute them to it. A turn that didn't hit
-// /api/v1 (Hermes pointed at a different backend) simply yields no events → no
-// count, exactly as before. Same-process only (browser + /api/v1 share origin).
-async function sumRouterUsageSince(
-  sinceMs: number
-): Promise<{ prompt: number; completion: number; total: number } | undefined> {
-  try {
-    const res = await fetch(`/api/router-feed`, { cache: "no-store" });
-    const data = await res.json().catch(() => ({}));
-    const events = Array.isArray(data?.events) ? data.events : [];
-    let prompt = 0,
-      completion = 0,
-      total = 0,
-      any = false;
-    // Small margin so minor browser↔server clock skew can't drop the first event.
-    // Safe against bleeding a prior turn in: turns are seconds apart, not <1.5s.
-    const cutoff = sinceMs - 1500;
-    for (const e of events) {
-      if (e?.kind === "tokens" && typeof e.at === "number" && e.at >= cutoff) {
-        prompt += e.prompt || 0;
-        completion += e.completion || 0;
-        total += e.total || 0;
-        any = true;
-      }
-    }
-    return any ? { prompt, completion, total } : undefined;
-  } catch {
-    return undefined;
-  }
-}
 
 // Dispatch ONE native tool call for the local loop. Browser tools drive the
 // user's logged-in Chromium and can only run client-side (via the bridge); every
@@ -248,6 +214,18 @@ async function dispatchLocalTool(name: string, args: any): Promise<unknown> {
 }
 
 const MAX_LOCAL_ROUNDS = 8;
+
+// Reasoning models (qwen3, gpt-oss) emit a <think>…</think> block — sometimes
+// UNclosed — in the message content. The cloud path strips it (lib/agent.ts
+// cleanReply); the local tool loop must too, or the chain-of-thought leaks into
+// the spoken/displayed reply.
+function stripReasoning(s?: string | null): string {
+  return (s || "")
+    .replace(/<think>[\s\S]*?<\/think>/gi, "")
+    .replace(/<think>[\s\S]*$/i, "") // unclosed think dump
+    .replace(/<\/?(think|reasoning|analysis)>/gi, "")
+    .trim();
+}
 
 function shortLocalResult(a: AgentResponse["actions"][number]): string {
   const raw = JSON.stringify(a.result);
@@ -335,9 +313,18 @@ export async function runLocalTurn(
     routing: null,
   };
 
-  // Mark the start so we can attribute this turn's /api/v1 token events (the loop
-  // routes through our router) back to it for the HUD's token count.
-  const startedAt = Date.now();
+  // Token usage for the HUD is accumulated straight from each round's completion
+  // (the /api/v1 proxy passes the upstream OpenAI `usage` through), so we never
+  // make the user wait on a separate /api/router-feed telemetry fetch.
+  const usageAcc = { prompt: 0, completion: 0, total: 0 };
+  let sawUsage = false;
+  const addUsage = (u: any) => {
+    if (!u) return;
+    usageAcc.prompt += u.prompt_tokens || 0;
+    usageAcc.completion += u.completion_tokens || 0;
+    usageAcc.total += u.total_tokens || (u.prompt_tokens || 0) + (u.completion_tokens || 0);
+    sawUsage = true;
+  };
 
   // 1) Server builds the routed prompt + the enabled toolset (client-only state,
   //    so the list of enabled tools is sent up).
@@ -391,8 +378,8 @@ export async function runLocalTurn(
       const result = await dispatchLocalTool(c.name, c.args ?? {});
       actions.push({ name: c.name, args: c.args ?? {}, result });
     }
-    const usage = await sumRouterUsageSince(startedAt);
-    return { ...base, reply: "Done.", actions, ...(usage ? { usage } : {}) };
+    // Preset path makes no LLM call, so there's no usage to report.
+    return { ...base, reply: "Done.", actions };
   }
 
   // 3) The tool-calling loop. `model: "auto"` lets the router rotate the key pool.
@@ -401,6 +388,12 @@ export async function runLocalTurn(
   let needToolRound = !prep.chat && prep.tools.length > 0;
   let attemptedBrowserOpenThisTurn = false;
   let browserScrollsThisTurn = 0;
+  // When the user asked what's on the page ("tell me what you found"), the
+  // snapshot a browser_open/act/scroll returns is only an interaction ref map —
+  // not readable prose. The model tends to answer straight from that tree and
+  // skip browser_read. We nudge it once, the first time a snapshot comes back.
+  const wantsPageSubstance = browserTaskNeedsSubstance(text);
+  let nudgedToReadPage = false;
   for (let round = 0; round < MAX_LOCAL_ROUNDS; round++) {
     const shouldUseTools = needToolRound;
     const roundTools = shouldUseTools ? prep.tools : [];
@@ -425,6 +418,7 @@ export async function runLocalTurn(
     }
     // Surface the model the router actually chose so the HUD shows what's
     // currently thinking on a LOCAL turn (not just the placeholder "local").
+    addUsage(r.completion?.usage);
     const picked = String(r.completion?.model ?? "").trim();
     if (picked) {
       lastModel = picked;
@@ -433,7 +427,7 @@ export async function runLocalTurn(
     const msg = r.completion?.choices?.[0]?.message;
     if (!msg) break;
     if (!roundTools.length) {
-      const content = String(msg.content ?? "").trim();
+      const content = stripReasoning(msg.content);
       if (/^MORE_TOOLS\b/i.test(content)) {
         needToolRound = !prep.chat && prep.tools.length > 0;
         messages.push({
@@ -463,7 +457,7 @@ export async function runLocalTurn(
     messages.push(msg);
     const calls = Array.isArray(msg.tool_calls) ? msg.tool_calls : [];
     if (!calls.length) {
-      reply = String(msg.content ?? "").trim();
+      reply = stripReasoning(msg.content);
       break;
     }
     for (const call of calls) {
@@ -497,10 +491,29 @@ export async function runLocalTurn(
         result = await dispatchLocalTool(name, args);
       }
       actions.push({ name, args, result });
+      // The snapshot returned by open/act/scroll/snapshot is a ref map for
+      // interaction, not page prose. If the user asked what's on the page and we
+      // haven't read it yet, tell the model explicitly to call browser_read for
+      // the human-readable text before answering — once is enough.
+      const returnedSnapshot =
+        (result as any)?.ok !== false &&
+        !!((result as any)?.snapshot?.tree || (result as any)?.tree);
+      if (name === "browser_read") nudgedToReadPage = true;
+      let toolContent = JSON.stringify(result).slice(0, 6000);
+      if (
+        wantsPageSubstance &&
+        !nudgedToReadPage &&
+        returnedSnapshot &&
+        (name === "browser_open" || name === "browser_act" || name === "browser_scroll" || name === "browser_snapshot")
+      ) {
+        nudgedToReadPage = true;
+        toolContent +=
+          "\n\nNOTE: the `tree`/`snapshot` above is only an interaction ref map, NOT the page's readable text. The user asked what is on the page, so call browser_read now to get the actual prose/results before you answer — do not summarize from this ref map.";
+      }
       messages.push({
         role: "tool",
         tool_call_id: call.id,
-        content: JSON.stringify(result).slice(0, 6000),
+        content: toolContent,
       });
     }
     needToolRound = false;
@@ -525,7 +538,7 @@ export async function runLocalTurn(
     }),
   }).catch(() => {});
 
-  const usage = await sumRouterUsageSince(startedAt);
+  const usage = sawUsage ? usageAcc : undefined;
   const model = lastModel || "local";
   // Tag the model as local-origin so the HUD/warm-up treats it as a local turn
   // (no cloud re-warm) while still showing the real model id the router used.

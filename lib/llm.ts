@@ -52,6 +52,40 @@ export async function createCompletion(
   return tryRouter(model, params);
 }
 
+// Streaming variant: returns the raw SSE Response (OpenAI-style `data:` chunks)
+// so the caller can read content deltas as they arrive. The router already passes
+// streams through untouched AND records token usage off a tee'd copy (via
+// stream_options.include_usage), so usage accounting still works. Errors are
+// thrown SDK-shaped, same as createCompletion, so the existing model-rotation
+// logic can fail over to the next model.
+export async function createCompletionStream(
+  model: ModelDef,
+  params: CompletionParams
+): Promise<Response> {
+  const result = await routeChatCompletion({
+    model: routerModelId(model),
+    ...params,
+    stream: true,
+  });
+  if (!result.ok) throw makeError(result.status, result.error);
+  const res = result.response;
+  if (!res.ok || !res.body) {
+    const text = await res.text().catch(() => "");
+    let msg = text;
+    try {
+      msg = JSON.parse(text)?.error?.message || text;
+    } catch {
+      /* keep raw text */
+    }
+    throw makeError(
+      res.status,
+      msg || `LLM stream failed (${res.status})`,
+      Object.fromEntries(res.headers.entries())
+    );
+  }
+  return res;
+}
+
 // Route through lib/llm-router (the llm_keys pool). Cloud and local both use
 // this same router/key pool; direct env-key completions are intentionally not a
 // fallback because they would make the two paths rotate differently.
