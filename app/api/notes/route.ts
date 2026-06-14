@@ -14,7 +14,11 @@ export async function POST(req: NextRequest) {
   const b = await req.json();
   const [row] = await db
     .insert(notes)
-    .values({ title: b.title ?? null, body: b.body ?? "" })
+    .values({
+      title: b.title ?? null,
+      body: b.body ?? "",
+      date: b.date ? new Date(b.date) : null,
+    })
     .returning();
   return NextResponse.json(row, { status: 201 });
 }

@@ -1,45 +1,387 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import type { WakeWordEngine } from "@/lib/wakeword";
+import {
+  runLocalAction,
+  runShell,
+  bridgeHealth,
+  getBridgeUrl,
+  getBridgeToken,
+  setBridgeConfig,
+  getUserProfile,
+  setUserProfile,
+  setDevMode,
+  pageSnapshot,
+  pageText,
+  pageScroll,
+  pageAct,
+} from "@/lib/bridge";
+import type { LoginState } from "@/lib/bridge";
+import { LOCAL_TOOL_GROUPS, getDisabledGroups, setGroupEnabled, getEnabledLocalToolNames } from "@/lib/tool-config";
+import type { LocalActionIntent } from "@/lib/local";
+import { getModelMode } from "@/lib/local-mode";
+import { useLocalPresence } from "@/lib/local-presence";
+import { decideTurnRoute } from "@/lib/turn-route";
+import { runLocalTurn } from "@/lib/local-agent";
+import { publishModel, logRoute, markThinking } from "@/lib/model-hud";
+import SwirlOrb from "@/components/jarvis/SwirlOrb";
+import { publishOrbState } from "@/lib/orb-state";
+import { Select } from "@/components/ui/Field";
 
-type Status = "idle" | "recording" | "thinking";
+type Status = "idle" | "recording" | "thinking" | "confirming";
+
+const DEFAULT_RECORD_MS = 8000; // how long to record after hearing "Jarvis"
+const LIVE_IDLE_MS = 30000; // end a live session after this long with no speech
+
+// Spoken phrases that start / end a live conversation (no wake word per turn).
+const LIVE_ENTER_RE =
+  /\b(live (mode|session|conversation)|conversation mode|let'?s (talk|chat)|start (a )?(live )?(conversation|chat|session)|keep listening)\b/;
+const LIVE_EXIT_RE =
+  /\b(end (the )?(live )?(session|conversation|chat)|stop listening|that'?s all|that'?ll be all|good ?bye|bye( jarvis)?|exit conversation|i'?m done|we'?re done|quit)\b/;
+
+// Map the tools JARVIS invoked to the tab the user probably wants to see.
+// Mutating tools win over list/read ones; first match by priority order.
+function pickTabFromActions(
+  actions: { name: string; result: any }[] | undefined
+): string | null {
+  if (!actions?.length) return null;
+  const names = actions.map((a) => a.name);
+  const has = (re: RegExp) => names.some((n) => re.test(n));
+  if (has(/task/)) return "tasks";
+  if (has(/event/)) return "calendar";
+  if (has(/note/)) return "notes";
+  if (has(/email/)) return "feed";
+  return null;
+}
 
 export default function VoiceButton({ onDone }: { onDone: () => void }) {
   const [status, setStatus] = useState<Status>("idle");
   const [transcript, setTranscript] = useState("");
   const [reply, setReply] = useState("");
+  // True when the last turn matched NO ability keyword (strict routing sent no
+  // tools), so we can nudge the user toward the Abilities/keywords tab.
+  const [typed, setTyped] = useState(""); // typed-command box (skip STT)
+  const [listening, setListening] = useState(false);
+  const [wakeBusy, setWakeBusy] = useState(false); // loading models / starting
+  // Live conversation: after the first trigger, keep the mic looping so you can
+  // talk back-and-forth without saying "Jarvis" every turn.
+  const [liveSession, setLiveSession] = useState(false);
+  const liveSessionRef = useRef(false);
+  const liveIdleRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [threshold, setThreshold] = useState(0.5);
+  const [score, setScore] = useState(0);
+  const [peak, setPeak] = useState(0); // highest score seen, helps calibration
+  const [recordMs, setRecordMs] = useState(DEFAULT_RECORD_MS);
+  const [autoSilence, setAutoSilence] = useState(true); // stop when you go quiet
+  // TTS voice selection — list of available voices + the chosen one (persisted).
+  const [voices, setVoices] = useState<SpeechSynthesisVoice[]>([]);
+  const [voiceURI, setVoiceURI] = useState("");
+  const voiceURIRef = useRef("");
+  const [speechRate, setSpeechRate] = useState(1.05);
+  const speechRateRef = useRef(1.05);
+  const [speaking, setSpeaking] = useState(false); // TTS is currently talking
+  const [maxWords, setMaxWords] = useState(20); // spoken-reply word cap
+  const maxWordsRef = useRef(20);
+  const [useSnapshot, setUseSnapshot] = useState(true); // attach data context
+  const useSnapshotRef = useRef(true);
+  // True while the controlled (Playwright) browser is open. Set on a successful
+  // snapshot, cleared when one reports the browser is closed. Sent to /api/voice
+  // so a free-form request ("what's my usage report") routes to the page planner
+  // even without a click/type keyword (cloud de-keyword path).
+  const browserOpenRef = useRef(false);
+  const thresholdRef = useRef(0.5);
+  const recordMsRef = useRef(DEFAULT_RECORD_MS);
+  const autoSilenceRef = useRef(true);
+  const cancelledRef = useRef(false); // set when the user cancels a capture
+  const abortRef = useRef<AbortController | null>(null); // aborts the in-flight request
+  const ttsHeartbeatRef = useRef<ReturnType<typeof setInterval> | null>(null); // keeps Chrome TTS alive
+  const silenceCtxRef = useRef<AudioContext | null>(null);
+  const silenceRafRef = useRef<number | null>(null);
+  // Pending local action (e.g. open Spotify) awaiting the user's spoken or
+  // tapped confirmation before we forward it to the local bridge.
+  const [pendingAction, setPendingAction] = useState<LocalActionIntent | null>(
+    null
+  );
+  const pendingActionRef = useRef<LocalActionIntent | null>(null);
+  // Pending controlled-browser ACTION (a planned click/type/scroll from the
+  // bridge snapshot) awaiting the user's spoken/tapped confirmation.
+  type BrowserPlan = { act: string; ref: number | null; text: string | null; say: string };
+  const [pendingBrowser, setPendingBrowser] = useState<BrowserPlan | null>(null);
+  const pendingBrowserRef = useRef<BrowserPlan | null>(null);
+  // The original free-form browser instruction, kept across confirmed steps so
+  // the client can re-plan on the fresh page (multi-step: click → re-snapshot →
+  // read). Cleared when the task finishes. `browserStepsRef` caps the loop.
+  const browserInstructionRef = useRef<string | null>(null);
+  const browserStepsRef = useRef(0);
+  // Autonomous browser mode (LOCAL/Hermes path): JARVIS's native browser tools are
+  // the browser capability, so the loop chains open→snapshot→read→click… WITHOUT a
+  // per-step confirm until it has the answer or hits the cap.
+  const autonomousBrowserRef = useRef(false);
+  const MAX_BROWSER_STEPS = 6;
+  // Developer mode: a proposed PowerShell command awaiting the user's TYPED
+  // confirmation (a tap on the literal command), never a spoken yes/no.
+  const [pendingShell, setPendingShell] = useState<{
+    command: string;
+    label: string;
+  } | null>(null);
+  const [shellRunning, setShellRunning] = useState(false);
+  const [shellOutput, setShellOutput] = useState<string | null>(null);
+  const [showBridge, setShowBridge] = useState(false);
+  const [bridgeUrl, setBridgeUrl] = useState("");
+  const [bridgeTok, setBridgeTok] = useState("");
+  const [bridgeOk, setBridgeOk] = useState<boolean | null>(null);
+  const [shellEnabled, setShellEnabled] = useState<boolean | null>(null);
+  const [devBusy, setDevBusy] = useState(false);
+  const [userProfile, setUserProfileState] = useState("");
+
+  // Local-computer presence (bridge / Ollama), polled. Used to route a
+  // turn to a local backend when the user picked local/hybrid mode. Mirrored to a
+  // ref so async capture callbacks read the latest value, not a stale closure.
+  const { status: presence } = useLocalPresence();
+  const presenceRef = useRef(presence);
+  useEffect(() => {
+    presenceRef.current = presence;
+  }, [presence]);
+
+  // Native toolset picker (LOCAL AI panel): which capability groups JARVIS may
+  // use. Stored client-side; sent with every turn so disabled groups stay out of
+  // the model schema even when a local failure falls back to cloud.
+  const [toolsOpen, setToolsOpen] = useState(false);
+  // Which control card is open as a centered popup (null = none).
+  const [openCard, setOpenCard] = useState<string | null>(null);
+  const [disabledGroups, setDisabledGroups] = useState<Set<string>>(new Set());
+  useEffect(() => {
+    setDisabledGroups(getDisabledGroups());
+    void syncToolSchema();
+  }, []);
+  const syncToolSchema = async () => {
+    try {
+      await fetch("/api/agent/tool-schema", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ enabledTools: getEnabledLocalToolNames() }),
+      });
+    } catch {
+      /* best-effort; prep also rewrites it on the next turn */
+    }
+  };
+  const toggleGroup = (key: string, enabled: boolean) => {
+    setGroupEnabled(key, enabled);
+    setDisabledGroups(getDisabledGroups());
+    void syncToolSchema();
+  };
+  const enabledGroupCount = LOCAL_TOOL_GROUPS.filter((g) => !disabledGroups.has(g.key)).length;
+
   const recorderRef = useRef<MediaRecorder | null>(null);
   const chunksRef = useRef<Blob[]>([]);
+  const statusRef = useRef<Status>("idle");
+  const engineRef = useRef<WakeWordEngine | null>(null);
+  const listeningRef = useRef(false);
+  const autoStopRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const captureModeRef = useRef<"command" | "confirm">("command");
+  const wakeLockRef = useRef<{ release: () => Promise<void> } | null>(null);
 
-  // Trigger voice list loading early so the first reply isn't silent.
+  // Best-effort screen wake lock so the device is less likely to sleep while
+  // Jarvis is listening. Auto-released by the browser when the tab is hidden,
+  // so we re-acquire on visibility. Not supported everywhere — fail silently.
+  async function acquireWakeLock() {
+    try {
+      const wl = (navigator as unknown as {
+        wakeLock?: { request: (t: string) => Promise<{ release: () => Promise<void> }> };
+      }).wakeLock;
+      if (wl && !document.hidden) wakeLockRef.current = await wl.request("screen");
+    } catch {
+      /* wake lock unavailable — ignore */
+    }
+  }
+
+  const setStatusBoth = (s: Status) => {
+    statusRef.current = s;
+    setStatus(s);
+  };
+
+  // Warm up TTS voices so the first reply isn't silent, and populate the picker.
   useEffect(() => {
     if (typeof window === "undefined" || !window.speechSynthesis) return;
-    window.speechSynthesis.getVoices();
-    const handler = () => window.speechSynthesis.getVoices();
-    window.speechSynthesis.addEventListener("voiceschanged", handler);
+    const saved = localStorage.getItem("tts.voice") || "";
+    setVoiceURI(saved);
+    voiceURIRef.current = saved;
+    const savedRate = parseFloat(localStorage.getItem("tts.rate") || "");
+    if (Number.isFinite(savedRate)) {
+      setSpeechRate(savedRate);
+      speechRateRef.current = savedRate;
+    }
+    const savedMax = parseInt(localStorage.getItem("reply.maxWords") || "", 10);
+    if (Number.isFinite(savedMax) && savedMax > 0) {
+      setMaxWords(savedMax);
+      maxWordsRef.current = savedMax;
+    }
+    const savedSnap = localStorage.getItem("agent.snapshot");
+    if (savedSnap === "false") {
+      setUseSnapshot(false);
+      useSnapshotRef.current = false;
+    }
+    const load = () => {
+      const list = window.speechSynthesis.getVoices();
+      // Prefer English voices first, but keep the rest available too.
+      const sorted = [...list].sort((a, b) => {
+        const ae = a.lang?.toLowerCase().startsWith("en") ? 0 : 1;
+        const be = b.lang?.toLowerCase().startsWith("en") ? 0 : 1;
+        return ae - be || a.name.localeCompare(b.name);
+      });
+      setVoices(sorted);
+    };
+    load();
+    window.speechSynthesis.addEventListener("voiceschanged", load);
     return () =>
-      window.speechSynthesis.removeEventListener("voiceschanged", handler);
+      window.speechSynthesis.removeEventListener("voiceschanged", load);
   }, []);
 
-  function speak(text: string) {
+  // Auto-start listening on load. If the browser blocks audio until a user
+  // gesture, start on the first interaction instead.
+  useEffect(() => {
+    void startListening();
+    const onGesture = () => {
+      if (!listeningRef.current) void startListening();
+    };
+    document.addEventListener("pointerdown", onGesture);
+    document.addEventListener("keydown", onGesture);
+
+    // Keep listening when the tab is backgrounded (the wake engine runs on the
+    // audio thread, so it survives). Just nudge the audio context if the
+    // browser suspended it, and restart if it actually died when we return.
+    const onVisibility = async () => {
+      if (document.hidden) {
+        await engineRef.current?.ensureRunning();
+      } else {
+        if (listeningRef.current) {
+          const ok = await engineRef.current?.ensureRunning();
+          if (!ok) {
+            stopListening();
+            void startListening();
+          }
+        } else {
+          void startListening();
+        }
+        void acquireWakeLock();
+      }
+    };
+    const onUnload = () => engineRef.current?.stop();
+    document.addEventListener("visibilitychange", onVisibility);
+    window.addEventListener("beforeunload", onUnload);
+    return () => {
+      document.removeEventListener("pointerdown", onGesture);
+      document.removeEventListener("keydown", onGesture);
+      document.removeEventListener("visibilitychange", onVisibility);
+      window.removeEventListener("beforeunload", onUnload);
+      stopSilenceDetection();
+      void wakeLockRef.current?.release().catch(() => {});
+      engineRef.current?.stop();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Warm up the LLM so the FIRST command isn't slow: a tiny ping that wakes the
+  // serverless function and primes the prompt cache (see /api/voice `warm`). We
+  // re-warm whenever the active model changes (a daily-limit rotation), so the
+  // newly-active model is primed too — tracked by warmedModelRef.
+  const warmedModelRef = useRef<string>("");
+  const warmUp = async () => {
+    try {
+      await fetch("/api/voice", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ warm: true }),
+      });
+    } catch {
+      /* a cold first request is the only cost */
+    }
+  };
+
+  // Warm the LLM on mount.
+  useEffect(() => {
+    void warmUp();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Speak `text`. `onEnd` (if given) fires when the utterance finishes — used by
+  // the confirm flow so we only open the mic AFTER the prompt stops playing, or
+  // the mic would record the prompt itself ("…say yes or no") and mis-hear it.
+  function speak(text: string, onEnd?: () => void) {
+    const clearHeartbeat = () => {
+      if (ttsHeartbeatRef.current) {
+        clearInterval(ttsHeartbeatRef.current);
+        ttsHeartbeatRef.current = null;
+      }
+    };
     try {
       const synth = window.speechSynthesis;
-      // Recover from the browser getting stuck in a paused/speaking state.
-      synth.resume();
-      synth.cancel();
+      if (!synth || !text) {
+        setSpeaking(false);
+        onEnd?.();
+        return;
+      }
+      clearHeartbeat();
+      synth.cancel(); // clear any stuck/previous utterance first
       const u = new SpeechSynthesisUtterance(text);
       u.lang = "en-US";
-      u.rate = 1.05;
-      const enVoice = synth
-        .getVoices()
-        .find((v) => v.lang?.toLowerCase().startsWith("en"));
-      if (enVoice) u.voice = enVoice;
-      synth.speak(u);
-      // Chrome bug: synthesis silently pauses on longer clips — nudge it.
-      setTimeout(() => synth.resume(), 200);
+      u.rate = speechRateRef.current || 1.05;
+      const all = synth.getVoices();
+      // Use the user's chosen voice if set; else the first English voice.
+      const chosen =
+        all.find((v) => v.voiceURI === voiceURIRef.current) ||
+        all.find((v) => v.lang?.toLowerCase().startsWith("en"));
+      if (chosen) {
+        u.voice = chosen;
+        u.lang = chosen.lang;
+      }
+      u.onstart = () => setSpeaking(true);
+      const done = () => {
+        setSpeaking(false);
+        clearHeartbeat();
+        onEnd?.();
+      };
+      u.onend = done;
+      u.onerror = done; // don't strand the flow if TTS errors
+      // Defer the speak to the NEXT tick: calling speak() in the same tick as
+      // cancel() is the documented Chrome bug where the utterance is silently
+      // dropped (the "sometimes it doesn't talk back" symptom). The small delay
+      // lets cancel() settle so the new utterance actually starts.
+      setTimeout(() => {
+        try {
+          synth.resume();
+          synth.speak(u);
+          // Chrome silently pauses synthesis after ~15s; nudge it while speaking
+          // so longer replies don't cut off, and stop nudging once it's done.
+          clearHeartbeat();
+          ttsHeartbeatRef.current = setInterval(() => {
+            if (synth.speaking) synth.resume();
+            else clearHeartbeat();
+          }, 8000);
+        } catch {
+          done();
+        }
+      }, 60);
     } catch {
-      /* TTS not available — ignore */
+      setSpeaking(false);
+      clearHeartbeat();
+      onEnd?.(); // TTS unavailable — proceed immediately so the flow continues
     }
+  }
+
+  // Immediately silence Jarvis (cancel any queued/active TTS).
+  function stopSpeaking() {
+    if (ttsHeartbeatRef.current) {
+      clearInterval(ttsHeartbeatRef.current);
+      ttsHeartbeatRef.current = null;
+    }
+    try {
+      window.speechSynthesis.cancel();
+    } catch {
+      /* ignore */
+    }
+    setSpeaking(false);
   }
 
   function pickMimeType() {
@@ -49,22 +391,103 @@ export default function VoiceButton({ onDone }: { onDone: () => void }) {
       "audio/ogg;codecs=opus",
       "audio/mp4",
     ];
-    for (const t of candidates) {
-      if (MediaRecorder.isTypeSupported(t)) return t;
-    }
+    for (const t of candidates) if (MediaRecorder.isTypeSupported(t)) return t;
     return "";
   }
 
-  async function startRecording() {
-    if (status !== "idle") return;
+  function stopSilenceDetection() {
+    if (silenceRafRef.current != null) {
+      cancelAnimationFrame(silenceRafRef.current);
+      silenceRafRef.current = null;
+    }
+    silenceCtxRef.current?.close().catch(() => {});
+    silenceCtxRef.current = null;
+  }
+
+  // Watch the recording stream's volume and auto-stop ~1.2s after the user
+  // stops talking (but only once they've actually said something).
+  function startSilenceDetection(stream: MediaStream) {
+    const SPEECH_RMS = 0.02; // above this counts as speech
+    const SILENCE_HANG_MS = 1300; // quiet for this long after speech => stop
+    const MIN_MS = 600; // ignore the first moments (avoid instant stop)
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        audio: {
-          noiseSuppression: true,
-          echoCancellation: true,
-          autoGainControl: true,
-        },
-      });
+      const Ctx =
+        window.AudioContext ||
+        (window as unknown as { webkitAudioContext: typeof AudioContext })
+          .webkitAudioContext;
+      const actx = new Ctx();
+      silenceCtxRef.current = actx;
+      const src = actx.createMediaStreamSource(stream);
+      const analyser = actx.createAnalyser();
+      analyser.fftSize = 2048;
+      src.connect(analyser);
+      const buf = new Float32Array(analyser.fftSize);
+      const startedAt = performance.now();
+      let hasSpoken = false;
+      let lastLoud = startedAt;
+
+      const tick = () => {
+        if (statusRef.current !== "recording") return;
+        analyser.getFloatTimeDomainData(buf);
+        let sum = 0;
+        for (let i = 0; i < buf.length; i++) sum += buf[i] * buf[i];
+        const rms = Math.sqrt(sum / buf.length);
+        const now = performance.now();
+        if (rms > SPEECH_RMS) {
+          // First sign of speech in a live turn: cancel the no-speech idle timer
+          // so a long answer isn't mistaken for an empty room.
+          if (!hasSpoken && liveIdleRef.current) {
+            clearTimeout(liveIdleRef.current);
+            liveIdleRef.current = null;
+          }
+          hasSpoken = true;
+          lastLoud = now;
+        }
+        if (
+          hasSpoken &&
+          now - startedAt > MIN_MS &&
+          now - lastLoud > SILENCE_HANG_MS
+        ) {
+          stopRecording(); // sends the captured audio
+          return;
+        }
+        silenceRafRef.current = requestAnimationFrame(tick);
+      };
+      silenceRafRef.current = requestAnimationFrame(tick);
+    } catch {
+      /* no analyser — fall back to the fixed timer */
+    }
+  }
+
+  async function startRecording(auto = false) {
+    if (statusRef.current !== "idle") return;
+    try {
+      // For the COMMAND capture, prefer a fresh stream WITH processing on
+      // (noise suppression + auto-gain + echo cancellation). The wake engine's
+      // shared stream is deliberately raw/low-gain (good for the wake model, bad
+      // for Whisper), so a clean, gain-normalized stream transcribes much more
+      // accurately. The wake engine is paused while we record, so the brief
+      // Spotify ducking that processing causes doesn't matter here. Fall back to
+      // the shared raw stream only if opening our own fails.
+      const shared = engineRef.current?.micStream ?? null;
+      let stream: MediaStream;
+      let ownStream = false;
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({
+          audio: {
+            echoCancellation: true,
+            noiseSuppression: true,
+            autoGainControl: true,
+          },
+        });
+        ownStream = true;
+      } catch {
+        if (shared && shared.getAudioTracks().some((t) => t.readyState === "live")) {
+          stream = shared;
+        } else {
+          throw new Error("no mic");
+        }
+      }
       const mimeType = pickMimeType();
       const rec = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
       chunksRef.current = [];
@@ -72,37 +495,198 @@ export default function VoiceButton({ onDone }: { onDone: () => void }) {
         if (e.data.size > 0) chunksRef.current.push(e.data);
       };
       rec.onstop = () => {
-        stream.getTracks().forEach((t) => t.stop());
+        stopSilenceDetection();
+        if (ownStream) stream.getTracks().forEach((t) => t.stop());
+        // User cancelled this capture — discard, don't transcribe.
+        if (cancelledRef.current) {
+          cancelledRef.current = false;
+          setStatusBoth("idle");
+          engineRef.current?.resume();
+          return;
+        }
         const blob = new Blob(chunksRef.current, {
           type: rec.mimeType || "audio/webm",
         });
-        // Too small => almost certainly an empty/aborted recording.
+        if (captureModeRef.current === "confirm") {
+          captureModeRef.current = "command";
+          void sendConfirmAudio(blob);
+          return;
+        }
         if (blob.size < 1200) {
-          setStatus("idle");
-          setReply("That was too short — hold the button while you speak.");
+          setStatusBoth("idle");
+          if (liveSessionRef.current) {
+            continueLiveSession(); // keep listening for the next thing they say
+          } else {
+            setReply("That was too short — hold the button while you speak.");
+            engineRef.current?.resume();
+          }
           return;
         }
         void sendAudio(blob);
       };
       recorderRef.current = rec;
-      // Timeslice => guarantees chunks are flushed even for short clips.
-      rec.start(250);
-      setStatus("recording");
+      cancelledRef.current = false;
+      // No timeslice: record into ONE blob flushed on stop. Slicing into 250ms
+      // chunks and concatenating can yield a container Groq's Whisper can't
+      // decode ("could not process file") — a single segment is always valid.
+      rec.start();
+      setStatusBoth("recording");
       setTranscript("");
-      setReply("");
-    } catch (err) {
+      if (captureModeRef.current !== "confirm") {
+        setReply(
+          liveSessionRef.current
+            ? "Listening…"
+            : auto
+            ? "Heard “Jarvis” — listening…"
+            : ""
+        );
+      }
+      // Live turns end on your pause (silence detection is forced on) and don't
+      // use the hard window cap; instead a no-speech idle timer ends the session.
+      // Wake-triggered captures stop on silence (if enabled) and always have a
+      // hard cap from the listen-window slider so they can't run forever.
+      if (auto) {
+        if (liveSessionRef.current) {
+          startSilenceDetection(stream);
+          if (liveIdleRef.current) clearTimeout(liveIdleRef.current);
+          liveIdleRef.current = setTimeout(() => {
+            if (liveSessionRef.current)
+              exitLiveSession("No one's talking — ending live conversation.");
+          }, LIVE_IDLE_MS);
+        } else {
+          if (autoSilenceRef.current) startSilenceDetection(stream);
+          autoStopRef.current = setTimeout(stopRecording, recordMsRef.current);
+        }
+      }
+    } catch {
       setReply("Microphone access denied.");
+      engineRef.current?.resume();
     }
   }
 
   function stopRecording() {
-    if (status !== "recording") return;
+    if (autoStopRef.current) {
+      clearTimeout(autoStopRef.current);
+      autoStopRef.current = null;
+    }
+    if (liveIdleRef.current) {
+      clearTimeout(liveIdleRef.current);
+      liveIdleRef.current = null;
+    }
+    if (statusRef.current !== "recording") return;
     recorderRef.current?.stop();
-    setStatus("thinking");
+    setStatusBoth("thinking");
+  }
+
+  // Abort the current capture or in-flight request and go back to listening.
+  function cancel() {
+    if (autoStopRef.current) {
+      clearTimeout(autoStopRef.current);
+      autoStopRef.current = null;
+    }
+    if (statusRef.current === "recording") {
+      cancelledRef.current = true; // tell onstop to discard
+      recorderRef.current?.stop();
+    } else if (statusRef.current === "thinking") {
+      abortRef.current?.abort();
+      setStatusBoth("idle");
+      engineRef.current?.resume();
+    }
+    setReply("Cancelled.");
+    setTranscript("");
+    // A cancel during a live session is the user's escape hatch — end it.
+    if (liveSessionRef.current) exitLiveSession("Live conversation off.");
+  }
+
+  // Transcribe a clip on its own (no agent) — used by the local-mode path, where
+  // we need the text before deciding which local backend runs the turn.
+  async function transcribeBlob(blob: Blob): Promise<string> {
+    try {
+      const form = new FormData();
+      form.append("audio", blob, "speech.webm");
+      const res = await fetch("/api/transcribe", { method: "POST", body: form });
+      const data = await res.json();
+      return (data.transcript || "").trim();
+    } catch {
+      return "";
+    }
+  }
+
+  // If the bridge is online, route this turn to the LOCAL backend and hand the
+  // result to the shared handler. Returns false only when no bridge is found, so
+  // the caller uses the cloud path.
+  async function dispatchLocal(text: string): Promise<boolean> {
+    const backend = decideTurnRoute(getModelMode(), text, presenceRef.current);
+    if (backend === "cloud") return false;
+    // FULLY MODEL-DRIVEN: no deterministic browser-intent pre-check. The local
+    // native tool loop is handed the enabled tool schema (including the agentic
+    // browser_* tools when that group is on) and decides for itself whether to
+    // open/snapshot/act on the controlled browser — same as every other tool.
+    autonomousBrowserRef.current = true; // browser tools the model calls run without per-step confirms
+    setStatusBoth("thinking");
+    // Local turn = JARVIS's own native tool loop, inference via the /api/v1 router.
+    markThinking("jarvis", "JARVIS (local) thinking…");
+    logRoute("jarvis", "▸ local turn → JARVIS native tools (/api/v1)");
+    const resp = await runLocalTurn(text, presenceRef.current, {
+      userProfile: getUserProfile(),
+      useSnapshot: useSnapshotRef.current,
+    });
+    // NO cloud fallback: local and cloud hit the SAME rotating /api/v1 keys, so a
+    // failure (rate-limited, router down) would just fail the same way on cloud —
+    // and switching paths would wrongly hand the model a different (all-tools)
+    // schema. Surface the error here and stay on the local path.
+    if (resp.error) {
+      console.warn("[JARVIS] local turn failed:", resp.error);
+      logRoute("jarvis", `local turn failed: ${resp.error}`);
+    }
+    processAgentResponse(resp);
+    return true; // handled either way — never fall back to cloud
+  }
+
+  // Run a turn on the CLOUD (text → /api/voice JSON), sharing the response
+  // handling. Used directly and as the fallback when a local Hermes turn fails.
+  async function runCloudText(text: string) {
+    const controller = new AbortController();
+    abortRef.current = controller;
+    markThinking("jarvis");
+    const res = await fetch("/api/voice", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        text,
+        userProfile: getUserProfile(),
+        maxWords: maxWordsRef.current,
+        useSnapshot: useSnapshotRef.current,
+        browserOpen: browserOpenRef.current,
+        enabledTools: getEnabledLocalToolNames(),
+      }),
+      signal: controller.signal,
+    });
+    const data = await res.json();
+    processAgentResponse(data);
   }
 
   async function sendAudio(blob: Blob) {
     try {
+      // Local computer online: transcribe, then run the turn on the user's
+      // machine (the cloud STT is still used — Whisper is cloud).
+      const p = presenceRef.current;
+      if (p.bridge) {
+        const text = await transcribeBlob(blob);
+        if (!text) {
+          setReply("I didn't catch that.");
+          setStatusBoth("idle");
+          engineRef.current?.resume();
+          if (liveSessionRef.current) continueLiveSession();
+          return;
+        }
+        setTranscript(text);
+        // If the local turn handled it, we're done; otherwise fall through to
+        // the cloud path with the already-transcribed text.
+        if (await dispatchLocal(text)) return;
+        await runCloudText(text);
+        return;
+      }
       const ext = blob.type.includes("mp4")
         ? "mp4"
         : blob.type.includes("ogg")
@@ -110,62 +694,1235 @@ export default function VoiceButton({ onDone }: { onDone: () => void }) {
         : "webm";
       const form = new FormData();
       form.append("audio", blob, `speech.${ext}`);
-      const res = await fetch("/api/voice", { method: "POST", body: form });
+      const profile = getUserProfile();
+      if (profile) form.append("userProfile", profile);
+      form.append("maxWords", String(maxWordsRef.current));
+      form.append("useSnapshot", String(useSnapshotRef.current));
+      form.append("browserOpen", String(browserOpenRef.current));
+      form.append("enabledTools", JSON.stringify(getEnabledLocalToolNames()));
+      const controller = new AbortController();
+      abortRef.current = controller;
+      markThinking("jarvis");
+      const res = await fetch("/api/voice", {
+        method: "POST",
+        body: form,
+        signal: controller.signal,
+      });
       const data = await res.json();
-      setTranscript(data.transcript || "");
-      setReply(data.reply || data.error || "");
-      if (data.reply) speak(data.reply);
-      onDone();
-    } catch {
+      processAgentResponse(data);
+    } catch (err: any) {
+      // Aborted by the user — cancel() already updated the UI, so leave it.
+      if (err?.name === "AbortError") return;
       setReply("Something went wrong.");
     } finally {
-      setStatus("idle");
+      abortRef.current = null;
+      // Don't clobber the confirmation flow if it took over.
+      if (statusRef.current === "thinking") {
+        setStatusBoth("idle");
+        engineRef.current?.resume(); // resume wake detection after the command
+      }
     }
   }
 
+  // Shared handling of the /api/voice response (used by both voice and typed
+  // input). Returns true if a confirmation flow (shell/local action) took over.
+  function processAgentResponse(data: any): boolean {
+    // Browser-console trace for testing: what routed, and which tools ran.
+    try {
+      const r = data.routing;
+      const head = r
+        ? `${r.multi ? "MULTI" : "single"}${r.slim ? " · slim" : ""} → sent [${(r.tools || []).join(", ")}]${r.trigger ? ` · trigger "${r.trigger}"` : ""}`
+        : "CHAT — no keyword matched (no tools)";
+      console.log(
+        `%c[JARVIS] "${data.transcript || ""}"%c\n  route: ${head}`,
+        "color:#22d3ee;font-weight:bold",
+        "color:inherit"
+      );
+      const acts = (data.actions || []) as { name: string; args: unknown; result: unknown }[];
+      if (acts.length) {
+        for (const a of acts) console.log(`  ▸ ran ${a.name}`, a.args, "→", a.result);
+      } else {
+        console.log("  ▸ no tools ran");
+      }
+      if (data.usage?.total) console.log(`  ▸ ${data.usage.total} tokens`);
+    } catch {
+      /* logging is best-effort */
+    }
+
+    if (data.transcript) setTranscript(data.transcript);
+    const utter = (data.transcript || "").toLowerCase();
+    // Voice control of live mode: end it if the user said an exit phrase, or
+    // (re)enter it if they asked to — handled before we speak/continue below.
+    if (liveSessionRef.current && LIVE_EXIT_RE.test(utter)) {
+      setReply(data.reply || "");
+      onDone();
+      exitLiveSession();
+      return false;
+    }
+    if (!liveSessionRef.current && LIVE_ENTER_RE.test(utter)) {
+      enterLiveSession(false); // flag on; the reply below keeps the loop going
+    }
+    setReply(data.reply || data.error || "");
+    if (data.model) {
+      // Mirror the model that answered into the floating HUD (visible from any
+      // tab), with the chain + which models were daily-exhausted this turn.
+      const out = (data.exhausted || []) as string[];
+      const detail = data.usage?.total ? `${data.usage.total} tok` : "answered";
+      publishModel("jarvis", data.model, detail, false);
+      if (out.length) logRoute("jarvis", `out today: ${out.join(", ")}`);
+      // If the active model rotated (e.g. the previous one hit its daily limit),
+      // re-warm so the now-active model + its next fallback are primed for the
+      // following request — keeps it fast even after a rotation.
+      // Only re-warm cloud models; a local turn (model "local:…") never uses the
+      // cloud warm-up path.
+      if (
+        data.model !== warmedModelRef.current &&
+        !/^local:/.test(data.model)
+      ) {
+        warmedModelRef.current = data.model;
+        void warmUp();
+      }
+    }
+    onDone();
+
+    // Route the user to the relevant tab based on what JARVIS just did
+    // (e.g. created a task → Tasks, read email → Inbox).
+    const navTab = pickTabFromActions(data.actions);
+    if (navTab) {
+      window.dispatchEvent(new CustomEvent("jarvis-nav", { detail: navTab }));
+    }
+
+    // A confirm flow (shell / local action) opens its own mic, so the live loop
+    // must NOT also restart listening — it resumes after the confirm finishes.
+    const shell = findShellAction(data.actions);
+    const intent = shell ? null : findLocalAction(data.actions);
+    // A controlled-browser command: the client drives the bridge and speaks its
+    // own progress, so take over BEFORE speaking the neutral server reply.
+    const browser = shell || intent ? null : findBrowserAction(data.actions);
+    if (browser) {
+      void handleBrowserAction(browser);
+      return true;
+    }
+    const willConfirm = !!(shell || intent);
+
+    // Speak the reply. In a live session, chain straight back into listening
+    // once Jarvis stops talking (unless a confirm flow is taking over).
+    const loopAfter = liveSessionRef.current && !willConfirm;
+    if (data.reply) {
+      speak(data.reply, loopAfter ? continueLiveSession : undefined);
+    } else if (loopAfter) {
+      continueLiveSession();
+    }
+
+    // Developer mode: a shell command needs a TYPED confirmation, its own flow.
+    if (shell) {
+      startShellConfirmation(shell);
+      return true;
+    }
+    // A local action (e.g. open Spotify) needs the confirm flow.
+    if (intent) {
+      startConfirmation(intent);
+      return true;
+    }
+    return false;
+  }
+
+  // Send a TYPED command (skips speech-to-text for accuracy). Reuses the same
+  // agent + response handling as voice.
+  async function sendText(text: string) {
+    const q = text.trim();
+    const busy = statusRef.current === "thinking";
+    if (!q || busy) return;
+    engineRef.current?.pause(); // don't let the wake word fire mid-request
+    setTranscript(q);
+    setReply("");
+    setStatusBoth("thinking");
+    try {
+      // Local/hybrid mode may run this turn on the user's machine instead.
+      if (await dispatchLocal(q)) return;
+      await runCloudText(q);
+    } catch (err: any) {
+      if (err?.name === "AbortError") return;
+      setReply("Something went wrong.");
+    } finally {
+      abortRef.current = null;
+      if (statusRef.current === "thinking") {
+        setStatusBoth("idle");
+        engineRef.current?.resume();
+      }
+    }
+  }
+
+  // Pull an open_local_app intent out of the agent's action results, if any.
+  function findLocalAction(
+    actions: { name: string; result: any }[] | undefined
+  ): LocalActionIntent | null {
+    if (!actions) return null;
+    for (const a of actions) {
+      const r = a.result;
+      if (
+        r &&
+        (r.local_action === "open" ||
+          r.local_action === "open_app" ||
+          r.local_action === "whatsapp_send") &&
+        r.target
+      ) {
+        return {
+          local_action: r.local_action,
+          target: r.target,
+          label: r.label || r.target,
+          ...(r.autoSend ? { autoSend: true } : {}),
+        };
+      }
+    }
+    return null;
+  }
+
+  // Phrase the confirm/run wording per action: WhatsApp "sends", the rest "open".
+  function actionVerb(intent: LocalActionIntent): { ask: string; doing: string } {
+    return intent.local_action === "whatsapp_send"
+      ? { ask: "send", doing: "Sending" }
+      : { ask: "open", doing: "Opening" };
+  }
+
+  // Pull a run_shell intent out of the agent's action results, if any.
+  function findShellAction(
+    actions: { name: string; result: any }[] | undefined
+  ): { command: string; label: string } | null {
+    if (!actions) return null;
+    for (const a of actions) {
+      const r = a.result;
+      if (r && r.local_action === "run_shell" && r.command) {
+        return { command: String(r.command), label: r.label || r.command };
+      }
+    }
+    return null;
+  }
+
+  // ── Controlled-browser actions (Phase 2, via the bridge) ───────────────────
+  type BrowserAction = {
+    kind: "open" | "read" | "act" | "macro";
+    url?: string;
+    mode?: "summarize" | "read";
+    instruction?: string;
+    actions?: string[]; // macro: a sequence of actions run in order
+    label: string;
+  };
+  function findBrowserAction(
+    actions: { name: string; result: any }[] | undefined
+  ): BrowserAction | null {
+    if (!actions) return null;
+    for (const a of actions) {
+      const r = a.result;
+      if (r && r.local_action === "browser" && r.browser_kind) {
+        return {
+          kind: r.browser_kind,
+          url: r.url,
+          mode: r.mode,
+          instruction: r.instruction,
+          actions: Array.isArray(r.actions) ? r.actions : undefined,
+          label: r.label || "",
+        };
+      }
+    }
+    return null;
+  }
+
+  // Track whether the controlled browser is open, from a snapshot result, so the
+  // cloud de-keyword path knows to route free-form requests to the page planner.
+  function noteSnapshot(r: { ok?: boolean }) {
+    browserOpenRef.current = !!r?.ok;
+  }
+
+  // Ask the planner for ONE action against the current page's element tree.
+  async function planFor(instruction: string): Promise<BrowserPlan | { error: string }> {
+    const snap = await pageSnapshot();
+    noteSnapshot(snap);
+    if (!snap.ok || !snap.tree) {
+      return { error: snap.error || "The Jarvis browser is off — say “open <site> in the browser” first (and make sure the bridge is running)." };
+    }
+    try {
+      const res = await fetch("/api/page/plan", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ instruction, tree: snap.tree, title: snap.title }),
+      });
+      const data = await res.json();
+      return data.plan || { error: data.error || "I couldn't plan that." };
+    } catch {
+      return { error: "I couldn't reach the planner." };
+    }
+  }
+
+  // Run an instruction automatically — plan one action and do it, no confirm.
+  // Used for pre-authorized steps (startup commands + macro sequences). Best-effort:
+  // a step that can't be planned is skipped rather than aborting the sequence.
+  async function runActionAuto(instruction: string) {
+    const plan = await planFor(instruction);
+    if ("error" in plan || plan.act === "none") return;
+    if (plan.act === "scroll_down" || plan.act === "scroll_up") {
+      await pageScroll(plan.act === "scroll_up" ? "up" : "down");
+      return;
+    }
+    await pageAct(plan.act as any, plan.ref ?? undefined, plan.text ?? undefined);
+  }
+
+  // Read/summarize the CURRENT page; returns the spoken text (does NOT finish).
+  async function readCurrentToText(mode: "summarize" | "read"): Promise<string> {
+    const t = await pageText();
+    if (!t.ok || !t.content) return t.error || "I couldn't read that page.";
+    try {
+      const res = await fetch("/api/page", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ content: t.content, title: t.title, mode }),
+      });
+      const data = await res.json();
+      return data.reply || data.error || "I couldn't summarize that page.";
+    } catch {
+      return "I couldn't reach the summarizer.";
+    }
+  }
+
+  // Read the current page and speak it (single-shot read/summarize).
+  async function readCurrentPage(mode: "summarize" | "read", label: string) {
+    setReply(`Reading ${label || "the page"}…`);
+    setStatusBoth("thinking");
+    finishBrowser(await readCurrentToText(mode));
+  }
+
+  const isReadStep = (s?: string) => !!s && /^(summari[sz]e|read)\b/i.test(s.trim());
+
+  // Drive a free-form browser instruction across as many steps as it takes:
+  // plan ONE action on the current page, and either finish (read/done/none/error)
+  // or confirm + run it, then re-plan on the fresh page. The original instruction
+  // is kept in browserInstructionRef so each re-plan pursues the same goal.
+  async function planAndConfirm(instruction: string) {
+    browserInstructionRef.current = instruction;
+    browserStepsRef.current = 0;
+    await stepBrowser();
+  }
+
+  // One iteration of the browser loop: snapshot (via planFor) + plan the next
+  // action. read/done → answer/finish; a real action → confirm it (the loop
+  // continues from runConfirmedBrowser after the user approves).
+  async function stepBrowser() {
+    const instruction = browserInstructionRef.current;
+    if (!instruction) return;
+    if (browserStepsRef.current >= MAX_BROWSER_STEPS) {
+      browserInstructionRef.current = null;
+      finishBrowser("That took more steps than I expected — tell me the next step and I'll continue.");
+      return;
+    }
+    browserStepsRef.current += 1;
+    setReply(browserStepsRef.current === 1 ? "One moment…" : "Working on it…");
+    setStatusBoth("thinking");
+    const plan = await planFor(instruction);
+    if ("error" in plan) {
+      browserInstructionRef.current = null;
+      finishBrowser(plan.error);
+      return;
+    }
+    // The page already has the answer — read it back to satisfy the question.
+    if (plan.act === "read") {
+      browserInstructionRef.current = null;
+      finishBrowser(await readCurrentToText("summarize"));
+      return;
+    }
+    if (plan.act === "done") {
+      browserInstructionRef.current = null;
+      finishBrowser(plan.say || "Done.");
+      return;
+    }
+    if (plan.act === "none") {
+      browserInstructionRef.current = null;
+      finishBrowser(plan.say || "I couldn't find that on the page.");
+      return;
+    }
+    // Read-only navigation (just scrolling to bring content into view) is safe to
+    // run WITHOUT a confirm — only state-changing actions (click/type/select/check,
+    // and back/enter which navigate or submit) ask first.
+    if (plan.act === "scroll_down" || plan.act === "scroll_up") {
+      setReply(`${plan.say}…`);
+      await pageScroll(plan.act === "scroll_up" ? "up" : "down");
+      if (browserInstructionRef.current) { await stepBrowser(); return; }
+      finishBrowser("Done.");
+      return;
+    }
+    // Autonomous (LOCAL/Hermes) path: JARVIS owns the browser, so run the planned
+    // action straight away and keep looping — no per-step confirm.
+    if (autonomousBrowserRef.current) {
+      await runConfirmedBrowser(plan);
+      return;
+    }
+    startBrowserConfirmation(plan);
+  }
+
+  // Open a url in the controlled browser. Returns ok:false (and finishes with an
+  // error) if the open failed; otherwise carries the detected login state + host so
+  // callers can warn. (Startup steps are no longer auto-run — they live in memory
+  // and Jarvis performs them itself as part of the task.)
+  async function openPage(
+    url?: string,
+    label?: string
+  ): Promise<{ ok: boolean; login?: LoginState; host?: string }> {
+    let login: LoginState | undefined;
+    let host: string | undefined;
+    if (url) {
+      setReply(`Opening ${label || "the page"} in your browser…`);
+      const r = await pageSnapshot(url);
+      noteSnapshot(r);
+      if (!r.ok) {
+        // The most common cause is "Playwright session off" — bridge not running
+        // or the Jarvis browser not started. Surface that clearly.
+        finishBrowser(
+          r.error ||
+            "I couldn't open that — is the bridge running and the Jarvis browser open? Start it with “npm run bridge”."
+        );
+        return { ok: false };
+      }
+      login = r.login;
+      host = r.url || url;
+    }
+    return { ok: true, login, host };
+  }
+
+  // Warn about a login the bridge detected. Returns a spoken note to use as the
+  // reply, or null if there's nothing to say. Jarvis no longer auto-fills here —
+  // when it's signing you in as part of a task it reads your saved login from
+  // memory (Abilities → Logins) and types it itself; it NEVER submits, and can't
+  // do Google/Apple/SSO. This note just tells you a login is in the way.
+  async function maybeHandleLogin(login?: LoginState, urlOrHost?: string): Promise<string | null> {
+    if (!login || !login.needed) return null;
+    const host = (() => {
+      try { return new URL(urlOrHost || "").hostname; } catch { return urlOrHost || "this site"; }
+    })();
+    const sso = login.providers.length
+      ? ` It also offers ${login.providers.join(" / ")} sign-in, which you'll need to do yourself.`
+      : "";
+
+    if (login.hasPassword || login.emailOnly) {
+      return `${host} needs a login. If you saved it under Abilities → Logins I can sign you in (you review and submit); otherwise sign in yourself in the Jarvis browser.${sso}`;
+    }
+
+    const ps = login.providers.length ? login.providers.join(" / ") : "Google/SSO";
+    return `Heads up — ${host} uses ${ps} sign-in, which I can't fill for you. Please log in yourself in the Jarvis browser window.`;
+  }
+
+  // Drive the bridge's real browser. open/read/macro run straight through (with any
+  // configured startup); a single click/type ("act") is planned then confirmed.
+  async function handleBrowserAction(b: BrowserAction) {
+    engineRef.current?.pause();
+
+    if (b.kind === "open") {
+      const o = await openPage(b.url, b.label);
+      if (!o.ok) return;
+      const note = await maybeHandleLogin(o.login, o.host || b.url);
+      finishBrowser(note || `Opened ${b.label || "the page"}.`);
+      return;
+    }
+
+    if (b.kind === "read") {
+      if (b.url) {
+        const o = await openPage(b.url, b.label);
+        if (!o.ok) return;
+        // If the page wants a login, warn instead of reading a login screen aloud.
+        const note = await maybeHandleLogin(o.login, o.host || b.url);
+        if (note) { finishBrowser(note); return; }
+      }
+      await readCurrentPage(b.mode || "summarize", b.label);
+      return;
+    }
+
+    if (b.kind === "macro") {
+      if (b.url) {
+        const o = await openPage(b.url, b.label);
+        if (!o.ok) return;
+        const note = await maybeHandleLogin(o.login, o.host || b.url);
+        if (note) { finishBrowser(note); return; }
+      }
+      const steps = (b.actions || []).filter(Boolean);
+      if (!steps.length) {
+        finishBrowser(`Opened ${b.label || "the page"}.`);
+        return;
+      }
+      // Run every step in order, automatically (the user pre-defined this macro,
+      // so no per-step confirm). A read/summarize step's text becomes the spoken
+      // reply at the end (the last read wins).
+      setStatusBoth("thinking");
+      let spoken = "";
+      for (let i = 0; i < steps.length; i++) {
+        const step = steps[i];
+        setReply(`Step ${i + 1} of ${steps.length}: ${step}…`);
+        if (isReadStep(step)) {
+          spoken = await readCurrentToText(/^read\b/i.test(step.trim()) ? "read" : "summarize");
+        } else {
+          await runActionAuto(step);
+        }
+      }
+      finishBrowser(spoken || "Done.");
+      return;
+    }
+
+    // kind === "act"
+    await planAndConfirm(b.instruction || "");
+  }
+
+  // Ask the user (aloud) to confirm a planned browser action, then listen yes/no.
+  function startBrowserConfirmation(plan: BrowserPlan) {
+    pendingBrowserRef.current = plan;
+    setPendingBrowser(plan);
+    setStatusBoth("confirming");
+    abortRef.current = null;
+    const question = `Do you want me to ${plan.say}? Say yes or no.`;
+    setReply(question);
+    engineRef.current?.pause();
+    let started = false;
+    const begin = () => {
+      if (started) return;
+      started = true;
+      setTimeout(() => {
+        if (statusRef.current !== "confirming") return;
+        captureModeRef.current = "confirm";
+        setStatusBoth("idle");
+        void startRecording(true);
+      }, 350);
+    };
+    speak(question, begin);
+    setTimeout(begin, 7000);
+  }
+
+  async function runConfirmedBrowser(plan: BrowserPlan) {
+    setReply(`${plan.say}…`);
+    const r = await pageAct(plan.act as any, plan.ref ?? undefined, plan.text ?? undefined);
+    if (!r.ok) {
+      browserInstructionRef.current = null;
+      finishBrowser(r.error || "That didn't work.");
+      return;
+    }
+    // The action may have advanced a login flow (e.g. clicking "Continue" after the
+    // email step reveals the password field) — re-snapshot and handle/warn if so.
+    try {
+      const snap = await pageSnapshot();
+      noteSnapshot(snap);
+      if (snap.ok) {
+        const note = await maybeHandleLogin(snap.login, snap.url);
+        if (note) { browserInstructionRef.current = null; finishBrowser(note); return; }
+      }
+    } catch {}
+    // Multi-step: if this action was part of a free-form instruction, re-plan on
+    // the now-updated page and keep going (click → re-snapshot → read → answer).
+    if (browserInstructionRef.current) {
+      await stepBrowser();
+      return;
+    }
+    finishBrowser(r.message || "Done.");
+  }
+
+  function finishBrowser(message: string) {
+    pendingBrowserRef.current = null;
+    browserInstructionRef.current = null; // end any multi-step browser loop
+    autonomousBrowserRef.current = false; // back to confirm-per-step for cloud turns
+    setPendingBrowser(null);
+    setReply(message);
+    speak(message);
+    setStatusBoth("idle");
+    engineRef.current?.resume();
+    continueLiveSession();
+  }
+
+  // Developer mode: present the literal command for a typed confirmation. We do
+  // NOT speak the command or listen for "yes" — the whole safety model is the
+  // user reading the exact text and tapping Run, so voice is deliberately out.
+  function startShellConfirmation(shell: { command: string; label: string }) {
+    setShellOutput(null);
+    setPendingShell(shell);
+    setStatusBoth("confirming");
+    abortRef.current = null;
+    const msg = `I've prepared a command: ${shell.label}. Review it and tap Run.`;
+    setReply(msg);
+    speak(msg);
+    engineRef.current?.pause(); // don't let "Jarvis" re-trigger mid-review
+  }
+
+  async function runPendingShell() {
+    const shell = pendingShell;
+    if (!shell || shellRunning) return;
+    setShellRunning(true);
+    setReply(`Running: ${shell.label}…`);
+    const res = await runShell(shell.command);
+    setShellRunning(false);
+    setPendingShell(null);
+    setShellOutput(res.output ?? "");
+    setReply(res.message);
+    speak(res.message);
+    setStatusBoth("idle");
+    engineRef.current?.resume();
+    continueLiveSession();
+  }
+
+  function cancelPendingShell() {
+    setPendingShell(null);
+    setReply("Cancelled.");
+    setStatusBoth("idle");
+    engineRef.current?.resume();
+    continueLiveSession();
+  }
+
+  // Ask the user (aloud) to confirm a local action, then listen for yes/no.
+  function startConfirmation(intent: LocalActionIntent) {
+    pendingActionRef.current = intent;
+    setPendingAction(intent);
+    setStatusBoth("confirming");
+    abortRef.current = null;
+    const question = `Do you want me to ${actionVerb(intent).ask} ${intent.label}? Say yes or no.`;
+    setReply(question);
+    engineRef.current?.pause(); // don't let "Jarvis" re-trigger mid-confirm
+
+    // Open the mic only AFTER the spoken prompt finishes (plus a short tail so the
+    // speaker stops ringing), so we capture the user's answer — not the prompt.
+    // Idempotent: whichever of onEnd / the safety timer fires first wins.
+    let started = false;
+    const begin = () => {
+      if (started) return;
+      started = true;
+      // ~350ms tail after speech ends before listening.
+      setTimeout(() => {
+        if (statusRef.current !== "confirming") return;
+        captureModeRef.current = "confirm";
+        setStatusBoth("idle"); // startRecording requires idle
+        void startRecording(true);
+      }, 350);
+    };
+    speak(question, begin);
+    // Safety net in case onend never fires (some browsers): begin anyway.
+    setTimeout(begin, 7000);
+  }
+
+  // Interpret the spoken yes/no and either run or cancel the pending action.
+  async function sendConfirmAudio(blob: Blob) {
+    const browserPlan = pendingBrowserRef.current;
+    const intent = pendingActionRef.current;
+    if (!intent && !browserPlan) {
+      setStatusBoth("idle");
+      engineRef.current?.resume();
+      return;
+    }
+    setStatusBoth("thinking");
+    let said = "";
+    try {
+      const form = new FormData();
+      form.append("audio", blob, "confirm.webm");
+      const res = await fetch("/api/transcribe", { method: "POST", body: form });
+      const data = await res.json();
+      said = (data.transcript || "").toLowerCase();
+    } catch {
+      /* treat as no answer */
+    }
+    // Belt-and-suspenders: if any tail of our own prompt leaked into the capture,
+    // strip the known prompt phrasing ("...say yes or no") so its "no" doesn't
+    // count as the user's answer.
+    const cleaned = said
+      .replace(/do you want me to.*?\?/g, " ")
+      .replace(/say yes or no\.?/g, " ")
+      .replace(/\byes or no\b/g, " ");
+    const yes = /\b(yes|yeah|yep|yup|sure|ok|okay|go|go ahead|do it|confirm|please|open|send)\b/.test(
+      cleaned
+    );
+    const no = /\b(no|nope|nah|don'?t|cancel|stop|never)\b/.test(cleaned);
+    if (yes && !no) {
+      if (browserPlan) await runConfirmedBrowser(browserPlan);
+      else if (intent) await runConfirmedAction(intent);
+    } else if (browserPlan) {
+      finishBrowser("Okay, I won't do that.");
+    } else if (intent) {
+      const msg = `Okay, I won't ${actionVerb(intent).ask} ${intent.label}.`;
+      finishConfirmation(msg);
+      speak(msg);
+    }
+  }
+
+  // Manual fallback buttons (in case the spoken answer is misheard).
+  function manualConfirm() {
+    const browserPlan = pendingBrowserRef.current;
+    const intent = pendingActionRef.current;
+    if (!intent && !browserPlan) return;
+    if (statusRef.current === "confirming") {
+      cancelledRef.current = true; // discard the listening capture, if any
+      recorderRef.current?.stop();
+    }
+    if (browserPlan) void runConfirmedBrowser(browserPlan);
+    else if (intent) void runConfirmedAction(intent);
+  }
+
+  function manualDeny() {
+    const browserPlan = pendingBrowserRef.current;
+    const intent = pendingActionRef.current;
+    if (statusRef.current === "confirming") {
+      cancelledRef.current = true;
+      recorderRef.current?.stop();
+    }
+    if (browserPlan) {
+      finishBrowser("Okay, I won't do that.");
+      return;
+    }
+    const msg = intent
+      ? `Okay, I won't ${actionVerb(intent).ask} ${intent.label}.`
+      : "Cancelled.";
+    finishConfirmation(msg);
+  }
+
+  async function runConfirmedAction(intent: LocalActionIntent) {
+    setReply(`${actionVerb(intent).doing} ${intent.label}…`);
+    const result = await runLocalAction(intent);
+    finishConfirmation(result.message);
+    speak(result.message);
+  }
+
+  function finishConfirmation(message: string) {
+    pendingActionRef.current = null;
+    setPendingAction(null);
+    setReply(message);
+    setStatusBoth("idle");
+    engineRef.current?.resume();
+    continueLiveSession(); // resume the loop if we're in a live session
+  }
+
+  function handleWake() {
+    if (statusRef.current !== "idle") return;
+    engineRef.current?.pause(); // don't detect our own command audio
+    void startRecording(true);
+  }
+
+  // ── Live conversation ──────────────────────────────────────────────────────
+  // Turn on continuous mode: pause the wake word and (optionally) greet, then
+  // start the listen→reply→listen loop so the user can talk normally.
+  function enterLiveSession(greet = true) {
+    liveSessionRef.current = true;
+    setLiveSession(true);
+    engineRef.current?.pause(); // wake word off for the duration of the session
+    if (greet) {
+      const msg =
+        'Live conversation on. I\'m listening — say "that\'s all" when you\'re done.';
+      setTranscript("");
+      setReply(msg);
+      speak(msg, continueLiveSession);
+    }
+  }
+
+  // End continuous mode and fall back to wake-word listening.
+  function exitLiveSession(
+    msg = 'Live conversation off. Say "Jarvis" when you need me.'
+  ) {
+    liveSessionRef.current = false;
+    setLiveSession(false);
+    if (liveIdleRef.current) {
+      clearTimeout(liveIdleRef.current);
+      liveIdleRef.current = null;
+    }
+    if (statusRef.current === "recording") {
+      cancelledRef.current = true; // discard any in-progress capture
+      recorderRef.current?.stop();
+    }
+    setStatusBoth("idle");
+    setReply(msg);
+    speak(msg);
+    engineRef.current?.resume(); // back to listening for "Jarvis"
+  }
+
+  // Re-open the mic for the next turn of a live session, after Jarvis finishes
+  // speaking. Deferred a tick so the request's `finally` can settle to idle.
+  function continueLiveSession() {
+    if (!liveSessionRef.current) return;
+    setTimeout(() => {
+      if (!liveSessionRef.current) return;
+      // Don't barge into a confirm flow; thinking will settle to idle here.
+      if (statusRef.current !== "idle" && statusRef.current !== "thinking") return;
+      setStatusBoth("idle");
+      engineRef.current?.pause();
+      captureModeRef.current = "command";
+      void startRecording(true);
+    }, 200);
+  }
+
+  function toggleLiveSession() {
+    if (liveSessionRef.current) exitLiveSession();
+    else enterLiveSession();
+  }
+
+  async function startListening() {
+    if (listeningRef.current || wakeBusy) return;
+    setWakeBusy(true);
+    try {
+      const { WakeWordEngine } = await import("@/lib/wakeword");
+      const engine = new WakeWordEngine({
+        threshold: thresholdRef.current,
+        onDetect: () => handleWake(),
+        onScore: (s) => {
+          setScore(s);
+          setPeak((p) => (s > p ? s : p));
+        },
+        onError: (m) => setReply(`Wake word error: ${m}`),
+      });
+      await engine.start();
+      engineRef.current = engine;
+      listeningRef.current = true;
+      setListening(true);
+      void acquireWakeLock();
+    } catch (err: any) {
+      setReply(`Couldn't start wake word: ${err?.message || "failed"}`);
+    } finally {
+      setWakeBusy(false);
+    }
+  }
+
+  function stopListening() {
+    engineRef.current?.stop();
+    engineRef.current = null;
+    listeningRef.current = false;
+    setListening(false);
+    void wakeLockRef.current?.release().catch(() => {});
+    wakeLockRef.current = null;
+  }
+
+  function toggleListening() {
+    if (listeningRef.current) stopListening();
+    else void startListening();
+  }
+
+  // Orb state — all stay BLUE; each state has its own motion/glow effect
+  // (no hue swap), so it reads as "more energetic" rather than "different colour".
+  const orb =
+    status === "recording"
+      ? "st-recording"
+      : status === "thinking"
+      ? "st-thinking"
+      : status === "confirming"
+      ? "st-confirming"
+      : listening
+      ? "st-listening"
+      : "st-standby";
+
+  // Mirror the live orb state to the global store so the persistent mini-orb on
+  // every other tab reflects it (e.g. it lights up if you speak from Calendar).
+  useEffect(() => {
+    publishOrbState(orb as any);
+  }, [orb]);
+
   const label =
     status === "recording"
-      ? "Listening… release to send"
+      ? captureModeRef.current === "confirm"
+        ? "Say “yes” or “no”…"
+        : liveSession
+        ? "Live — go ahead…"
+        : "Listening to you…"
       : status === "thinking"
       ? "Thinking…"
-      : "Hold to talk";
+      : status === "confirming"
+      ? "Confirm?"
+      : wakeBusy
+      ? "Starting…"
+      : liveSession
+      ? "Live conversation — just talk"
+      : listening
+      ? "Say “Jarvis”"
+      : "Tap to start listening";
+
+  const openDeckCard = (key: string) => {
+    if (key === "bridge") {
+      setBridgeUrl(getBridgeUrl());
+      setBridgeTok(getBridgeToken());
+      setUserProfileState(getUserProfile());
+      setBridgeOk(null);
+    }
+    setOpenCard(key);
+  };
+  const dockCards: { key: string; label: string; n?: string; on?: boolean }[] = [
+    ...(presence.bridge
+      ? [{ key: "tools", label: "Tools", n: `${enabledGroupCount}/${LOCAL_TOOL_GROUPS.length}` }]
+      : []),
+    { key: "live", label: "Live conversation", on: liveSession },
+    { key: "settings", label: "Voice & settings" },
+    { key: "bridge", label: "Bridge" },
+  ];
 
   return (
-    <div className="flex flex-col items-center gap-3">
-      <button
-        onMouseDown={startRecording}
-        onMouseUp={stopRecording}
-        onMouseLeave={stopRecording}
-        onTouchStart={(e) => {
-          e.preventDefault();
-          startRecording();
-        }}
-        onTouchEnd={(e) => {
-          e.preventDefault();
-          stopRecording();
-        }}
-        disabled={status === "thinking"}
-        className={`h-24 w-24 select-none rounded-full text-lg font-semibold shadow-lg transition-transform active:scale-95 ${
-          status === "recording"
-            ? "animate-pulse bg-red-500"
-            : status === "thinking"
-            ? "bg-amber-500"
-            : "bg-indigo-600 hover:bg-indigo-500"
-        }`}
-      >
-        🎤
-      </button>
-      <p className="text-sm text-neutral-400">{label}</p>
-      {transcript && (
-        <p className="max-w-md text-center text-sm text-neutral-300">
-          <span className="text-neutral-500">You:</span> {transcript}
-        </p>
+    <div className="jarvis-stage">
+      {/* Control cards open as a centered popup over a blurred backdrop */}
+      {openCard && (
+        <div className="deck-modal-overlay" onClick={() => setOpenCard(null)}>
+          <div className="deck-modal" onClick={(e) => e.stopPropagation()}>
+            <button className="deck-modal-close" onClick={() => setOpenCard(null)} aria-label="Close">✕</button>
+
+            {openCard === "live" && (
+              <div className="deck-card-body">
+                <h3 className="deck-card-title">Live conversation</h3>
+                <button
+                  className={`deck-btn ${liveSession ? "" : "ghost"}`}
+                  onClick={toggleLiveSession}
+                  disabled={!listening}
+                  style={{ width: "100%" }}
+                >
+                  {liveSession ? "■ End live conversation" : "🔊 Start live conversation"}
+                </button>
+                <p className="deck-hint" style={{ marginTop: ".6rem" }}>
+                  {liveSession
+                    ? "Just talk — I keep listening after each reply. Say “that’s all” to stop."
+                    : "Start a session and talk normally — no need to say “Jarvis” every time. You can also just say “let’s talk”."}
+                </p>
+              </div>
+            )}
+
+            {openCard === "tools" && presence.bridge && (
+              <div className="deck-card-body">
+                <h3 className="deck-card-title">Local tools</h3>
+                <p className="deck-hint" style={{ marginTop: 0 }}>
+                  Your computer is connected — turns run on JARVIS&apos;s local loop.
+                  Only checked groups are sent to the model (fewer = smaller prompt).
+                </p>
+                <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 8 }}>
+                  {LOCAL_TOOL_GROUPS.map((g) => (
+                    <label
+                      key={g.key}
+                      style={{ display: "flex", alignItems: "flex-start", gap: 8, fontSize: 13, cursor: "pointer" }}
+                      title={g.tools.join(", ")}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={!disabledGroups.has(g.key)}
+                        onChange={(e) => toggleGroup(g.key, e.target.checked)}
+                        style={{ marginTop: 3 }}
+                      />
+                      <span>
+                        <span style={{ fontWeight: 600 }}>{g.label}</span>
+                        <span className="mono" style={{ opacity: 0.5, fontSize: 11 }}>
+                          {" "}· {g.tools.length} tool{g.tools.length === 1 ? "" : "s"}
+                        </span>
+                        <br />
+                        <span className="deck-hint" style={{ fontSize: 11 }}>{g.hint}</span>
+                      </span>
+                    </label>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {openCard === "settings" && (
+              <div className="deck-card-body">
+                <h3 className="deck-card-title">Voice &amp; detection</h3>
+                <div className="deck-row">
+                  <span>Live score</span>
+                  <span className="mono">{score.toFixed(2)} · pk {peak.toFixed(2)}</span>
+                </div>
+                <div className="deck-meter">
+                  <div className={`deck-meter-fill ${score >= threshold ? "hot" : ""}`} style={{ width: `${Math.min(100, score * 100)}%` }} />
+                  <div className="deck-meter-mark" style={{ left: `${threshold * 100}%` }} title="threshold" />
+                </div>
+                <div className="deck-row">
+                  <span>Threshold {threshold.toFixed(2)}</span>
+                  <button className="deck-mini" onClick={() => setPeak(0)}>reset peak</button>
+                </div>
+                <input type="range" min={0} max={1} step={0.01} value={threshold}
+                  onChange={(e) => { const v = parseFloat(e.target.value); setThreshold(v); thresholdRef.current = v; engineRef.current?.setThreshold(v); }}
+                  className="deck-range" />
+                <label className="deck-check">
+                  <input type="checkbox" checked={autoSilence}
+                    onChange={(e) => { setAutoSilence(e.target.checked); autoSilenceRef.current = e.target.checked; }} />
+                  Auto-stop when I go quiet
+                </label>
+                <div className="deck-row"><span>Max window {(recordMs / 1000).toFixed(0)}s</span></div>
+                <input type="range" min={3} max={20} step={1} value={recordMs / 1000}
+                  onChange={(e) => { const ms = parseInt(e.target.value, 10) * 1000; setRecordMs(ms); recordMsRef.current = ms; }}
+                  className="deck-range" />
+
+                <label className="deck-label">Jarvis voice</label>
+                <Select
+                  value={voiceURI}
+                  onChange={(v) => { setVoiceURI(v); voiceURIRef.current = v; localStorage.setItem("tts.voice", v); }}
+                  options={[
+                    { value: "", label: "Default (auto English)" },
+                    ...voices.map((v) => ({ value: v.voiceURI, label: `${v.name} (${v.lang})${v.localService ? "" : " — online"}` })),
+                  ]}
+                  className="deck-select"
+                />
+                <div className="deck-row" style={{ marginTop: ".6rem" }}>
+                  <span>Speed {speechRate.toFixed(2)}×</span>
+                  <button className="deck-mini" onClick={() => speak("Systems online. How can I help?")}>test voice</button>
+                </div>
+                <input type="range" min={0.7} max={1.4} step={0.05} value={speechRate}
+                  onChange={(e) => { const r = parseFloat(e.target.value); setSpeechRate(r); speechRateRef.current = r; localStorage.setItem("tts.rate", String(r)); }}
+                  className="deck-range" />
+                <div className="deck-row"><span>Reply length {maxWords} words</span></div>
+                <input type="range" min={5} max={60} step={1} value={maxWords}
+                  onChange={(e) => { const n = parseInt(e.target.value, 10); setMaxWords(n); maxWordsRef.current = n; localStorage.setItem("reply.maxWords", String(n)); }}
+                  className="deck-range" />
+                <label className="deck-check">
+                  <input type="checkbox" checked={useSnapshot}
+                    onChange={(e) => { setUseSnapshot(e.target.checked); useSnapshotRef.current = e.target.checked; localStorage.setItem("agent.snapshot", String(e.target.checked)); }} />
+                  Send my data as context
+                </label>
+                <p className="deck-hint">
+                  Lets Jarvis edit/delete items by name. Turn off for fewer tokens —
+                  ref commands (“delete task 3”) still work.
+                </p>
+                {listening && (
+                  <button className="deck-link" onClick={toggleListening}>stop listening</button>
+                )}
+              </div>
+            )}
+
+            {openCard === "bridge" && (
+              <div className="deck-card-body">
+                <h3 className="deck-card-title">Bridge</h3>
+                <p className="deck-hint">
+                  Run <code>npm run bridge</code> on your laptop, then paste the token
+                  here so Jarvis can open allowlisted apps.
+                </p>
+                <label className="deck-label">Bridge URL</label>
+                <input value={bridgeUrl} onChange={(e) => setBridgeUrl(e.target.value)} placeholder="http://127.0.0.1:7777" className="deck-input" />
+                <label className="deck-label">Token</label>
+                <input value={bridgeTok} onChange={(e) => setBridgeTok(e.target.value)} placeholder="paste token from the bridge" className="deck-input" />
+                <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 8 }}>
+                  <button className="deck-btn" onClick={() => { setBridgeConfig(bridgeUrl, bridgeTok); setBridgeOk(null); }}>Save</button>
+                  <button className="deck-btn ghost" onClick={async () => {
+                    setBridgeConfig(bridgeUrl, bridgeTok);
+                    const h = await bridgeHealth();
+                    setBridgeOk(h.ok);
+                    setShellEnabled(h.ok ? !!h.shellEnabled : null);
+                    if (h.ok && h.home && !getUserProfile()) { setUserProfileState(h.home); setUserProfile(h.home); }
+                  }}>Test</button>
+                  {bridgeOk === true && <span style={{ color: "#5fd39a" }}>● connected</span>}
+                  {bridgeOk === false && <span style={{ color: "var(--u5c)" }}>● not reachable</span>}
+                </div>
+                {bridgeOk === true && (
+                  <div style={{ marginTop: 10 }}>
+                    <div className="deck-row">
+                      <span>Developer mode {shellEnabled ? <span style={{ color: "var(--u4c)" }}>● ON</span> : <span style={{ color: "var(--t2)" }}>○ off</span>}</span>
+                      <button className="deck-btn" disabled={devBusy} onClick={async () => {
+                        setDevBusy(true); const r = await setDevMode(!shellEnabled); setDevBusy(false);
+                        if (r.ok) setShellEnabled(!!r.shellEnabled);
+                      }}>{devBusy ? "…" : shellEnabled ? "Turn off" : "Turn on"}</button>
+                    </div>
+                    <p className="deck-hint">
+                      Lets Jarvis run PowerShell commands (tap-confirmed each time).
+                      Only enable on a machine you trust.
+                    </p>
+                    <label className="deck-label">Default folder to open from</label>
+                    <input value={userProfile} onChange={(e) => setUserProfileState(e.target.value)} onBlur={() => setUserProfile(userProfile)} placeholder="C:\\Users\\You\\Downloads" className="deck-input" />
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        </div>
       )}
-      {reply && (
-        <p className="max-w-md text-center text-sm text-indigo-300">
-          <span className="text-neutral-500">AI:</span> {reply}
-        </p>
-      )}
+
+      {/* ── Center: the big J.A.R.V.I.S. orb ── */}
+      <div className="jarvis-center">
+        {/* Full-bleed DNA-stream orb behind everything, reacting to state */}
+        <SwirlOrb state={orb as any} />
+
+        {/* Title + status sit above the orb */}
+        <h1 className="jarvis-title">J.A.R.V.I.S.</h1>
+        <p className="jarvis-caption">{label}</p>
+
+        <button
+          onClick={() => {
+            if (!listening) void startListening();
+          }}
+          className={`jarvis-orb ${orb}`}
+          aria-label={label}
+        >
+          <span className="jo-ticks" aria-hidden />
+          <span className="jo-ring" aria-hidden />
+          <span className="jo-ring2" aria-hidden />
+          <span className="jo-arc" aria-hidden />
+          <span className="jo-arc jo-arc2" aria-hidden />
+          <span className="jo-particles" aria-hidden />
+          <span className="jo-sweep" aria-hidden />
+          <span className="jo-inner" aria-hidden />
+          <span className="jo-reactor" aria-hidden />
+          <span className="jo-core" aria-hidden />
+          <span className="jo-label">J.A.R.V.I.S.</span>
+        </button>
+
+        {/* Capture controls sit right on top of the prompt while active */}
+        {(status === "recording" || status === "thinking") && (
+          <div className="deck-capture">
+            {status === "recording" && (
+              <button className="deck-btn" onClick={stopRecording}>■ Stop &amp; send</button>
+            )}
+            <button className="deck-btn ghost" onClick={cancel}>✕ Cancel</button>
+          </div>
+        )}
+
+        {/* Typed command — skip speech-to-text when you want exact wording. */}
+        <form
+          className="jarvis-type"
+          onSubmit={(e) => {
+            e.preventDefault();
+            const q = typed;
+            setTyped("");
+            void sendText(q);
+          }}
+        >
+          <input
+            className="jarvis-type-input"
+            value={typed}
+            onChange={(e) => setTyped(e.target.value)}
+            placeholder="…or type a command (more accurate than voice)"
+            disabled={status === "thinking"}
+          />
+          <button
+            type="submit"
+            className="jarvis-type-send"
+            disabled={!typed.trim() || status === "thinking"}
+            aria-label="Send typed command"
+          >
+            ➤
+          </button>
+        </form>
+
+        {/* Flowing dock of control cards — continuously slides left→right within
+            the prompt's width and loops; hover to pause, click to open. */}
+        <div className="deck-dock">
+          <div className="deck-dock-track">
+            {[0, 1].map((dup) =>
+              dockCards.map((c) => (
+                <button
+                  key={`${c.key}-${dup}`}
+                  className={`deck-chip${c.on ? " on" : ""}`}
+                  onClick={() => openDeckCard(c.key)}
+                  aria-hidden={dup === 1 ? true : undefined}
+                  tabIndex={dup === 1 ? -1 : undefined}
+                >
+                  <span>{c.label}</span>
+                  {c.n && <span className="deck-chip-n">{c.n}</span>}
+                </button>
+              ))
+            )}
+          </div>
+        </div>
+      </div>
+
+      {/* ── Right feed: conversation + confirmations (kept OFF the centered
+            column so they never push the orb or scroll the page) ── */}
+      <aside className="jarvis-feed">
+        {pendingAction && (
+          <div className="jarvis-confirm">
+            <p>
+              {pendingAction.local_action === "whatsapp_send" ? "Send" : "Open"}{" "}
+              <span className="font-semibold">{pendingAction.label}</span> on your
+              computer?
+            </p>
+            <div className="flex gap-2">
+              <button className="deck-btn" onClick={manualConfirm}>
+                ✓ Allow
+              </button>
+              <button className="deck-btn ghost" onClick={manualDeny}>
+                ✕ Deny
+              </button>
+            </div>
+            <p className="deck-hint">Or just say “yes” or “no”.</p>
+          </div>
+        )}
+
+        {pendingBrowser && (
+          <div className="jarvis-confirm">
+            <p>
+              In your browser: <span className="font-semibold">{pendingBrowser.say}</span>?
+            </p>
+            <div className="flex gap-2">
+              <button className="deck-btn" onClick={manualConfirm}>
+                ✓ Allow
+              </button>
+              <button className="deck-btn ghost" onClick={manualDeny}>
+                ✕ Deny
+              </button>
+            </div>
+            <p className="deck-hint">Or just say “yes” or “no”.</p>
+          </div>
+        )}
+
+        {pendingShell && (
+          <div className="jarvis-confirm">
+            <p>
+              Run this command on your computer?{" "}
+              <span className="deck-hint">({pendingShell.label})</span>
+            </p>
+            <pre className="shell-cmd">{pendingShell.command}</pre>
+            <div className="flex gap-2">
+              <button
+                className="deck-btn"
+                onClick={runPendingShell}
+                disabled={shellRunning}
+              >
+                {shellRunning ? "Running…" : "▶ Run"}
+              </button>
+              <button
+                className="deck-btn ghost"
+                onClick={cancelPendingShell}
+                disabled={shellRunning}
+              >
+                ✕ Cancel
+              </button>
+            </div>
+            <p className="deck-hint">
+              Read the exact command above — it runs as written. Tap to confirm
+              (no voice).
+            </p>
+          </div>
+        )}
+
+        {shellOutput != null && shellOutput !== "" && (
+          <pre className="shell-out">{shellOutput}</pre>
+        )}
+
+        {transcript && (
+          <p className="jarvis-line">
+            <span className="jarvis-line-tag">YOU</span> {transcript}
+          </p>
+        )}
+        {reply && (
+          <div className="jarvis-reply">
+            <p>
+              <span className="jarvis-line-tag accent">JARVIS</span> {reply}
+            </p>
+            {speaking ? (
+              <button
+                className="replay-btn stop"
+                onClick={stopSpeaking}
+                title="Stop Jarvis talking"
+              >
+                <span className="replay-ico" aria-hidden>
+                  <svg viewBox="0 0 24 24" width="13" height="13" fill="currentColor">
+                    <rect x="5" y="5" width="14" height="14" rx="2" />
+                  </svg>
+                </span>
+                Stop
+              </button>
+            ) : (
+              status === "idle" && (
+                <button
+                  className="replay-btn"
+                  onClick={() => speak(reply)}
+                  title="Replay reply"
+                >
+                  <span className="replay-ico" aria-hidden>
+                    <svg viewBox="0 0 24 24" width="14" height="14" fill="none"
+                      stroke="currentColor" strokeWidth="2.2" strokeLinecap="round"
+                      strokeLinejoin="round">
+                      <path d="M3 12a9 9 0 1 0 3-6.7" />
+                      <path d="M3 3v4h4" />
+                    </svg>
+                  </span>
+                  Replay
+                </button>
+              )
+            )}
+          </div>
+        )}
+      </aside>
     </div>
   );
 }

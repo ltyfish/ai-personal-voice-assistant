@@ -14,6 +14,8 @@ export async function PATCH(
   if (b.location !== undefined) patch.location = b.location;
   if (b.startTime !== undefined) patch.startTime = new Date(b.startTime);
   if (b.endTime !== undefined) patch.endTime = new Date(b.endTime);
+  if (b.done !== undefined) patch.done = b.done;
+  if (b.projectId !== undefined) patch.projectId = b.projectId;
 
   const [row] = await db
     .update(events)

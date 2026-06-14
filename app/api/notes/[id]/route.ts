@@ -12,6 +12,7 @@ export async function PATCH(
   const patch: Record<string, any> = { updatedAt: new Date() };
   if (b.title !== undefined) patch.title = b.title;
   if (b.body !== undefined) patch.body = b.body;
+  if (b.date !== undefined) patch.date = b.date ? new Date(b.date) : null;
 
   const [row] = await db
     .update(notes)

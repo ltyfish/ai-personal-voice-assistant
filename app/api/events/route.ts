@@ -19,6 +19,7 @@ export async function POST(req: NextRequest) {
       location: b.location ?? null,
       startTime: new Date(b.startTime),
       endTime: new Date(b.endTime),
+      projectId: b.projectId ?? null,
     })
     .returning();
   return NextResponse.json(row, { status: 201 });

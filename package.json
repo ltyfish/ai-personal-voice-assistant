@@ -3,30 +3,48 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "next dev",
+    "dev": "node scripts/dev.mjs",
+    "dev:web": "next dev",
     "build": "next build",
     "start": "next start",
     "lint": "next lint",
     "db:generate": "drizzle-kit generate",
-    "db:push": "drizzle-kit push"
+    "db:push": "drizzle-kit push",
+    "bridge": "node scripts/bridge/server.mjs",
+    "bridge:browser-install": "playwright install chromium",
+    "telegram:login": "node scripts/telegram-login.mjs",
+    "models:check": "node scripts/check-models.mjs"
   },
   "dependencies": {
     "@neondatabase/serverless": "^0.10.4",
+    "@netlify/functions": "^5.3.0",
+    "@remotion/player": "^4.0.474",
+    "cloudinary": "^2.10.0",
     "drizzle-orm": "^0.36.4",
+    "googleapis": "^140.0.1",
     "groq-sdk": "^0.9.1",
+    "mammoth": "^1.12.0",
     "next": "^14.2.33",
+    "nodemailer": "^6.10.1",
+    "onnxruntime-web": "^1.20.1",
+    "pdf-parse": "^2.4.5",
     "react": "^18.3.1",
-    "react-dom": "^18.3.1"
+    "react-dom": "^18.3.1",
+    "remotion": "^4.0.474",
+    "telegram": "^2.26.22",
+    "twilio": "^5.13.1"
   },
   "devDependencies": {
     "@types/node": "^20.17.6",
+    "@types/nodemailer": "^6.4.23",
     "@types/react": "^18.3.12",
     "@types/react-dom": "^18.3.1",
-    "autoprefixer": "^10.4.20",
+    "autoprefixer": "^10.5.0",
     "dotenv": "^17.4.2",
     "drizzle-kit": "^0.28.1",
-    "postcss": "^8.4.49",
-    "tailwindcss": "^3.4.15",
+    "playwright": "^1.48.0",
+    "postcss": "^8.5.15",
+    "tailwindcss": "^3.4.19",
     "typescript": "^5.6.3"
   }
 }

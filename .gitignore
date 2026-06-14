@@ -8,3 +8,13 @@ node_modules
 .DS_Store
 .vercel
 db/migrations/meta
+scripts/bridge/.bridge-token
+scripts/migrated-keys.json
+
+# Abilities-tab keyword/ability requests (runtime, local only)
+keyword-requests.md
+
+# Separate prod build output (see next.config.mjs)
+.next-build/
+
+graphify-out/

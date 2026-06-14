@@ -11,6 +11,8 @@ export type BaseEvent = {
   endTime: string;
   recurrence?: Recurrence;
   recurrenceEnd?: string | null;
+  // When set, this event is scheduled time for a project (a "project event").
+  projectId?: string | null;
 };
 
 export type Occurrence = BaseEvent & {
