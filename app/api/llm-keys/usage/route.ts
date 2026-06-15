@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { asc } from "drizzle-orm";
 import { db, llmKeys, llmModels, llmUsage } from "@/db";
-import { FALLBACK_AUTO_CHAIN, PROVIDERS } from "@/lib/llm-router";
+import { FALLBACK_AUTO_CHAIN, PROVIDERS, getActiveModelCooldowns, normalizeModelCooldownCatalogId } from "@/lib/llm-router";
 import { byBestModel, modelRank } from "@/lib/model-rank";
 import { defaultDailyTokenCap } from "@/lib/model-budget";
 
@@ -24,10 +24,11 @@ export const dynamic = "force-dynamic";
 // so a stale `today_tokens` from a previous day reads as 0 without a cron reset.
 export async function GET() {
   const today = new Date().toISOString().slice(0, 10);
-  const [usage, keys, catalog] = await Promise.all([
+  const [usage, keys, catalog, modelCooldowns] = await Promise.all([
     db.select().from(llmUsage),
     db.select().from(llmKeys).orderBy(asc(llmKeys.platform), asc(llmKeys.createdAt)),
     db.select().from(llmModels),
+    getActiveModelCooldowns(),
   ]);
 
   // Enabled keys per platform — the multiplier for a model's combined daily
@@ -120,7 +121,16 @@ export async function GET() {
   }
 
   const modelRows = [...models.values()]
-    .map((m) => ({ ...m, rank: modelRank(m.model) }))
+    .map((m) => {
+      const cd = modelCooldowns[normalizeModelCooldownCatalogId(m.model)];
+      return {
+        ...m,
+        rank: modelRank(m.model),
+        cooledDown: !!cd,
+        cooldownUntil: cd?.until ?? null,
+        cooldownDetail: cd?.detail ?? null,
+      };
+    })
     .sort(byBestModel((m) => m.model));
 
   // Per-platform rollup.

@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { eq } from "drizzle-orm";
-import { db, tasks } from "@/db";
+import { db, tasks, subtasks } from "@/db";
 
 export const runtime = "nodejs";
 
@@ -29,6 +29,10 @@ export async function DELETE(
   _req: NextRequest,
   { params }: { params: { id: string } }
 ) {
+  // Remove child subtasks first. The FK is declared ON DELETE CASCADE, but the
+  // subtasks table may pre-date that constraint, so delete them explicitly to be
+  // safe (otherwise orphaned subtasks linger on the calendar).
+  await db.delete(subtasks).where(eq(subtasks.taskId, params.id));
   await db.delete(tasks).where(eq(tasks.id, params.id));
   return NextResponse.json({ deleted: true });
 }

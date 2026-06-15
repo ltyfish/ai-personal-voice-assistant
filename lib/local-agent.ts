@@ -219,6 +219,15 @@ const MAX_LOCAL_ROUNDS = 8;
 // UNclosed — in the message content. The cloud path strips it (lib/agent.ts
 // cleanReply); the local tool loop must too, or the chain-of-thought leaks into
 // the spoken/displayed reply.
+// Hard cap on the spoken reply length, mirroring lib/agent.ts clampWords. The
+// prompts ASK for the cap, but local models often run long, so we also enforce
+// it here as a guarantee (the reply is read aloud).
+function clampWords(s: string, max: number): string {
+  const words = s.trim().split(/\s+/).filter(Boolean);
+  if (words.length <= max) return s.trim();
+  return words.slice(0, max).join(" ").replace(/[,;:]$/, "") + "…";
+}
+
 function stripReasoning(s?: string | null): string {
   return (s || "")
     .replace(/<think>[\s\S]*?<\/think>/gi, "")
@@ -233,12 +242,12 @@ function shortLocalResult(a: AgentResponse["actions"][number]): string {
   return `- ${a.name} ${JSON.stringify(a.args ?? {})} -> ${result}`;
 }
 
-function localContinuationPrompt(text: string, actions: AgentResponse["actions"]): any[] {
+function localContinuationPrompt(text: string, actions: AgentResponse["actions"], maxWords: number): any[] {
   return [
     {
       role: "system",
       content:
-        "You are JARVIS at a no-tools checkpoint. Decide if the user's full request is complete from the tool results. If more tool work is still needed and the prior tools succeeded, reply exactly `MORE_TOOLS: <brief next step>`. For browser tasks where the user asked what you find on a page, do not answer `Done`; use browser_read content, a useful snapshot returned by browser_open/browser_scroll/browser_act/browser_snapshot, or a concrete browser failure to report. Do not call browser_read just to check whether a click worked when browser_act already returned a snapshot. If browser_act says a target is missing, continue with MORE_TOOLS and call browser_scroll to reveal more refs before retrying; scroll at most twice in one request, then act/read/answer from what is visible. Do not quote raw snapshot text or read element labels as a list; interpret the snapshot like a person and speak naturally about what is visible or what still needs to be clicked. If a required non-recoverable tool failed, explain the failure briefly instead of retrying the same tool. Otherwise reply naturally in one short spoken sentence. Do not invent tool results.",
+        `You are JARVIS at a no-tools checkpoint. Decide if the user's full request is complete from the tool results. If more tool work is still needed and the prior tools succeeded, reply exactly \`MORE_TOOLS: <brief next step>\`. For browser tasks where the user asked what you find on a page, do not answer \`Done\`; use browser_read content, a useful snapshot returned by browser_open/browser_scroll/browser_act/browser_snapshot, or a concrete browser failure to report. Do not call browser_read just to check whether a click worked when browser_act already returned a snapshot. If browser_act says a target is missing, continue with MORE_TOOLS and call browser_scroll to reveal more refs before retrying; scroll at most twice in one request, then act/read/answer from what is visible. Do not quote raw snapshot text or read element labels as a list; interpret the snapshot like a person and speak naturally about what is visible or what still needs to be clicked. If a required non-recoverable tool failed, explain the failure briefly instead of retrying the same tool. Otherwise reply naturally in ONE short spoken sentence of AT MOST ${maxWords} words (it is read aloud). Do not invent tool results.`,
     },
     {
       role: "user",
@@ -300,8 +309,10 @@ function browserFallbackReply(text: string, actions: AgentResponse["actions"]): 
 export async function runLocalTurn(
   text: string,
   presence: LocalStatus,
-  opts: { userProfile?: string; useSnapshot?: boolean }
+  opts: { userProfile?: string; useSnapshot?: boolean; maxWords?: number }
 ): Promise<AgentResponse> {
+  // Spoken-reply word cap from the deck slider (same bounds as the cloud path).
+  const maxWords = Math.max(5, Math.min(60, opts.maxWords || 20));
   const base: AgentResponse = {
     transcript: text,
     reply: "",
@@ -330,6 +341,7 @@ export async function runLocalTurn(
   //    so the list of enabled tools is sent up).
   let prep: {
     system: string;
+    context?: string;
     tools: any[];
     chat: boolean;
     onlyPreset: boolean;
@@ -366,8 +378,12 @@ export async function runLocalTurn(
     prepTimer.done();
   }
 
+  // Static prefix (behavior + about-me + persona + tool rules) first so it forms a
+  // cacheable head with the tool schema; the volatile tail (date/snapshot/recent
+  // activity) rides a SECOND system message so it never breaks the cache.
   const messages: any[] = [
     { role: "system", content: prep.system },
+    ...(prep.context ? [{ role: "system", content: prep.context }] : []),
     { role: "user", content: text },
   ];
   const actions: AgentResponse["actions"] = [];
@@ -386,7 +402,9 @@ export async function runLocalTurn(
   let reply = "";
   let lastModel = ""; // the actual model the router landed on (for the HUD + usage)
   let needToolRound = !prep.chat && prep.tools.length > 0;
-  let attemptedBrowserOpenThisTurn = false;
+  let openedSuccessfullyThisTurn = false;
+  let browserOpenAttemptsThisTurn = 0;
+  const MAX_BROWSER_OPEN_ATTEMPTS = 3;
   let browserScrollsThisTurn = 0;
   // When the user asked what's on the page ("tell me what you found"), the
   // snapshot a browser_open/act/scroll returns is only an interaction ref map —
@@ -399,7 +417,7 @@ export async function runLocalTurn(
     const roundTools = shouldUseTools ? prep.tools : [];
     const body: any = {
       model: "auto",
-      messages: roundTools.length ? messages : actions.length ? localContinuationPrompt(text, actions) : messages,
+      messages: roundTools.length ? messages : actions.length ? localContinuationPrompt(text, actions, maxWords) : messages,
     };
     if (roundTools.length) {
       body.tools = roundTools;
@@ -473,11 +491,21 @@ export async function runLocalTurn(
         if (cleanUrl) args = { ...args, url: cleanUrl };
       }
       let result: unknown;
-      if (name === "browser_open" && attemptedBrowserOpenThisTurn) {
+      // Only block re-opening once a page has ALREADY opened successfully (so the
+      // model doesn't navigate away from a good page). A FAILED open (404/timeout)
+      // is retryable up to MAX_BROWSER_OPEN_ATTEMPTS — the earlier "one attempt
+      // total" gate wrongly rejected retries even when the first open failed, so a
+      // transient bridge error killed the whole turn though a retry would succeed.
+      if (name === "browser_open" && openedSuccessfullyThisTurn) {
         result = {
           ok: false,
           error:
-            "browser_open has already been attempted in this turn. Use browser_snapshot, browser_scroll, browser_act, or browser_read on the current page instead of opening another page.",
+            "A page is already open in this turn. Use browser_snapshot, browser_scroll, browser_act, or browser_read on the current page instead of opening another page.",
+        };
+      } else if (name === "browser_open" && browserOpenAttemptsThisTurn >= MAX_BROWSER_OPEN_ATTEMPTS) {
+        result = {
+          ok: false,
+          error: `browser_open failed ${MAX_BROWSER_OPEN_ATTEMPTS} times this turn. Report the failure to the user instead of retrying.`,
         };
       } else if (name === "browser_scroll" && browserScrollsThisTurn >= 2) {
         result = {
@@ -486,9 +514,12 @@ export async function runLocalTurn(
             "browser_scroll has already been used twice in this turn. Use the latest snapshot to call browser_act, browser_read, or answer what is visible instead of scrolling again.",
         };
       } else {
-        if (name === "browser_open") attemptedBrowserOpenThisTurn = true;
+        if (name === "browser_open") browserOpenAttemptsThisTurn++;
         if (name === "browser_scroll") browserScrollsThisTurn++;
         result = await dispatchLocalTool(name, args);
+        if (name === "browser_open" && (result as any)?.ok !== false) {
+          openedSuccessfullyThisTurn = true;
+        }
       }
       actions.push({ name, args, result });
       // The snapshot returned by open/act/scroll/snapshot is a ref map for
@@ -519,10 +550,13 @@ export async function runLocalTurn(
     needToolRound = false;
   }
 
-  const finalReply =
+  const rawFinalReply =
     reply && !weakBrowserDoneReply(reply) && !looksLikeBareBrowserToolNameReply(reply) && !looksLikeRawBrowserSnapshotReply(reply)
       ? reply
       : browserFallbackReply(text, actions);
+  // Enforce the spoken-reply word cap (the local model ignores the prompt's ask
+  // more often than the cloud summary pass does).
+  const finalReply = clampWords(rawFinalReply, maxWords);
 
   // Record this turn into JARVIS's Obsidian state (memory.md / decision.md /
   // activity.md) — fire-and-forget, never blocks the reply. Server-side fs only,

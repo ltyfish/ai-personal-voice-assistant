@@ -89,6 +89,13 @@ export default function ModelHud() {
   // feed after we've emptied it.
   const minIdRef = useRef(0);
   const pausedRef = useRef(false);
+  // Bumped on every clear. A poll that started before a clear sees its captured
+  // token differ from the current one and discards its (now stale) events, so an
+  // in-flight fetch can't repopulate the feed after we've emptied it.
+  const genRef = useRef(0);
+  // True while a clear's DELETE is in flight — blocks new polls during that window
+  // so none fire with the pre-clear `since` and re-fetch the events being deleted.
+  const clearingRef = useRef(false);
   useEffect(() => {
     pausedRef.current = paused;
   }, [paused]);
@@ -106,10 +113,14 @@ export default function ModelHud() {
     let stop = false;
     let timer: ReturnType<typeof setTimeout> | null = null;
     async function tick() {
-      if (!stop && !pausedRef.current) {
+      if (!stop && !pausedRef.current && !clearingRef.current) {
+        const myGen = genRef.current;
         try {
           const res = await fetch(`/api/router-feed?since=${sinceRef.current}`, { cache: "no-store" });
           const data = await res.json();
+          // A clear happened while this poll was in flight — its events predate the
+          // clear, so drop them instead of repopulating the just-emptied feed.
+          if (myGen !== genRef.current) throw new Error("stale");
           const events: RouterEvent[] = Array.isArray(data?.events) ? data.events : [];
           if (typeof data?.lastId === "number") sinceRef.current = data.lastId;
           if (events.length) applyEvents(events);
@@ -154,8 +165,10 @@ export default function ModelHud() {
   }
 
   async function clearFeed() {
-    // Drop everything seen so far, then ignore any pre-clear events still in
-    // flight from a poll that started before this click.
+    // Invalidate any in-flight poll (genRef) and block new polls (clearingRef) so
+    // nothing can repopulate the feed while we clear it on the server.
+    genRef.current++;
+    clearingRef.current = true;
     minIdRef.current = sinceRef.current;
     setRows([]);
     try {
@@ -167,6 +180,11 @@ export default function ModelHud() {
       }
     } catch {
       /* local clear already happened */
+    } finally {
+      // Bump again so a poll that slipped out between the two awaits is also voided,
+      // then re-enable polling from the new (post-clear) baseline.
+      genRef.current++;
+      clearingRef.current = false;
     }
   }
 

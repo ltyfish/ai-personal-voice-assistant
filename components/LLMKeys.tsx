@@ -34,6 +34,9 @@ type UsageModel = {
   requests: number;
   keyCount: number;
   dayCap: number;
+  cooledDown?: boolean;
+  cooldownUntil?: string | null;
+  cooldownDetail?: string | null;
 };
 
 // Compact token count: 1234 -> "1.2k", 1_500_000 -> "1.5M".
@@ -383,6 +386,9 @@ export default function LLMKeys() {
                     (m.dayCap ? ` of ${m.dayCap.toLocaleString()} daily budget (${remaining.toLocaleString()} left)` : "") +
                     `, ${m.totalTokens.toLocaleString()} tokens all-time, ${m.requests.toLocaleString()} requests.` +
                     (m.source === "fallback" ? " Built-in fallback chain model." : "") +
+                    (m.cooledDown
+                      ? ` On cooldown until ${m.cooldownUntil ? new Date(m.cooldownUntil).toLocaleTimeString() : "soon"}${m.cooldownDetail ? ` (${m.cooldownDetail})` : ""}; skipped by auto rotation until then.`
+                      : "") +
                     (m.enabled ? " Included in auto rotation." : " Disabled: skipped by auto rotation.");
                   return (
                     <div key={m.model} title={title}
@@ -390,6 +396,12 @@ export default function LLMKeys() {
                         opacity: m.enabled ? (m.totalTokens ? 1 : 0.7) : 0.38 }}>
                       <span style={{ flex: 1, wordBreak: "break-all" }}>{m.model}</span>
                       {m.source === "fallback" && <span style={{ fontSize: 11, color: "var(--t2)" }}>fallback</span>}
+                      {m.cooledDown && (
+                        <span style={{ fontSize: 11, color: "var(--u4c)" }}
+                          title={m.cooldownUntil ? `Cooled until ${new Date(m.cooldownUntil).toLocaleTimeString()}` : "On cooldown"}>
+                          ⏳ cooldown
+                        </span>
+                      )}
                       {!m.enabled && <span style={{ fontSize: 11, color: "var(--u4c)" }}>disabled</span>}
                       {m.dayCap ? (
                         <div style={{ width: 90, height: 5, borderRadius: 3, background: "var(--a-dim)", overflow: "hidden" }}

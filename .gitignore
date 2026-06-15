@@ -18,3 +18,5 @@ keyword-requests.md
 .next-build/
 
 graphify-out/
+# Bridge browser profile (runtime Chrome data, never commit)
+scripts/bridge/.browser-profile/

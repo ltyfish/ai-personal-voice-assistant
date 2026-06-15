@@ -270,6 +270,39 @@ async function markModelCooldown(platform: string, model: string, ms: number, de
   }
 }
 
+// All model-level cooldowns still in effect, keyed by the normalized model id
+// (the same id markModelCooldown stores). Used by the LLM-Keys dashboard to show
+// which MODELS are currently cooled (vs. the per-KEY cooldown badge). The caller
+// matches a catalog model via normalizeModelCooldownCatalogId().
+export async function getActiveModelCooldowns(): Promise<
+  Record<string, { until: string; detail: string }>
+> {
+  try {
+    const rows = await db
+      .select({ key: mailKv.key, value: mailKv.value })
+      .from(mailKv)
+      .where(eq(mailKv.namespace, MODEL_COOLDOWN_NS));
+    const now = Date.now();
+    const out: Record<string, { until: string; detail: string }> = {};
+    for (const r of rows) {
+      const v = r.value as { until?: string; detail?: string } | undefined;
+      const untilMs = v?.until ? new Date(v.until).getTime() : 0;
+      if (!untilMs || untilMs <= now) continue;
+      // Normalize the stored key too (legacy keys were "platform/model").
+      out[normalizeModelCooldownId(r.key)] = { until: v!.until!, detail: v?.detail || "model cooldown" };
+    }
+    return out;
+  } catch {
+    return {};
+  }
+}
+
+// Exposed so the dashboard can map a catalog model id to the same normalized id
+// the cooldown store uses.
+export function normalizeModelCooldownCatalogId(model: string): string {
+  return normalizeModelCooldownId(model);
+}
+
 async function filterAvailableModels(candidates: string[]): Promise<string[]> {
   const out: string[] = [];
   for (const candidate of candidates) {
