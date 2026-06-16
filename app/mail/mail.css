@@ -2462,3 +2462,35 @@ input[type="range"].deck-range {
   color:var(--t2);
 }
 .proj-imp-date .ui-date-trigger:hover { border-color:var(--border); }
+
+/* ═══════════════════════════════════════════════
+   MOBILE — assistant dashboard (tasks / calendar / notes / projects)
+   Additive pass: desktop layout is untouched; these only kick in on phones.
+   ═══════════════════════════════════════════════ */
+@media (max-width:640px) {
+  /* Never let a wide child force a horizontal scroll on the whole page. */
+  .assistant-tab, .modern-tab { max-width:100%; width:100%; }
+  .main-content { overflow-x:hidden; }
+
+  /* Calendar month grid: 7 columns of 94px-min cells overflow a phone. Shrink the
+     cells and gaps so the whole month fits the viewport width. */
+  .cal-grid { gap:3px; }
+  .cal-cell { min-height:58px; padding:.25rem; border-radius:7px; }
+  .cal-daynum { width:19px; height:19px; font-size:.7rem; }
+  .cal-chip { font-size:.56rem; padding:.04rem .25rem; }
+  .cal-dow { font-size:.55rem; padding:.2rem 0; }
+  .cal-head h1 { font-size:1.35rem; }
+  .cal-nav button { width:32px; height:32px; font-size:1rem; }
+  .cal-nav .cal-today { padding:0 .7rem; font-size:.72rem; }
+
+  /* Cards: trim the generous desktop padding so content isn't squeezed. */
+  .assistant-tab .a-card-inner,
+  .modern-tab .a-card-inner { padding:1rem; }
+
+  /* Detail/edit rows: stack their date fields instead of overflowing. */
+  .todo-detail-row .ui-date,
+  .subtask-date { min-width:0; width:100%; flex:1 1 100%; }
+
+  /* Project improvement grids already collapse at 600px; keep titles from clipping. */
+  .proj-imp-main { flex-wrap:wrap; }
+}

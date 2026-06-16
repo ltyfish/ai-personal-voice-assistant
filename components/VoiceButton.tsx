@@ -746,7 +746,8 @@ export default function VoiceButton({ onDone }: { onDone: () => void }) {
         maxWords: maxWordsRef.current,
         useSnapshot: useSnapshotRef.current,
         browserOpen: browserOpenRef.current,
-        enabledTools: getEnabledLocalToolNames(),
+        // Cloud turn: withhold bridge-only tools when no laptop is connected.
+        enabledTools: getEnabledLocalToolNames({ bridgeAvailable: presenceRef.current.bridge }),
       }),
       signal: controller.signal,
     });
@@ -787,7 +788,7 @@ export default function VoiceButton({ onDone }: { onDone: () => void }) {
       form.append("maxWords", String(maxWordsRef.current));
       form.append("useSnapshot", String(useSnapshotRef.current));
       form.append("browserOpen", String(browserOpenRef.current));
-      form.append("enabledTools", JSON.stringify(getEnabledLocalToolNames()));
+      form.append("enabledTools", JSON.stringify(getEnabledLocalToolNames({ bridgeAvailable: presenceRef.current.bridge })));
       const controller = new AbortController();
       abortRef.current = controller;
       markThinking("jarvis");
@@ -1703,9 +1704,10 @@ export default function VoiceButton({ onDone }: { onDone: () => void }) {
     setOpenCard(key);
   };
   const dockCards: { key: string; label: string; n?: string; on?: boolean }[] = [
-    ...(presence.bridge
-      ? [{ key: "tools", label: "Tools", n: `${enabledGroupCount}/${LOCAL_TOOL_GROUPS.length}` }]
-      : []),
+    // Always offer the Tools card — in the cloud (no bridge) the data tools
+    // (tasks, calendar, notes, projects, email, Spotify, messaging, GitHub) still
+    // run server-side; only the bridge-only groups need the laptop.
+    { key: "tools", label: "Tools", n: `${enabledGroupCount}/${LOCAL_TOOL_GROUPS.length}` },
     { key: "live", label: "Live conversation", on: liveSession },
     { key: "settings", label: "Voice & settings" },
     { key: "bridge", label: "Bridge" },
@@ -1738,36 +1740,48 @@ export default function VoiceButton({ onDone }: { onDone: () => void }) {
               </div>
             )}
 
-            {openCard === "tools" && presence.bridge && (
+            {openCard === "tools" && (
               <div className="deck-card-body">
-                <h3 className="deck-card-title">Local tools</h3>
+                <h3 className="deck-card-title">Tools</h3>
                 <p className="deck-hint" style={{ marginTop: 0 }}>
-                  Your computer is connected — turns run on JARVIS&apos;s local loop.
-                  Only checked groups are sent to the model (fewer = smaller prompt).
+                  {presence.bridge
+                    ? "Your computer is connected — turns run on JARVIS's local loop. Only checked groups are sent to the model (fewer = smaller prompt)."
+                    : "Running in the cloud. The data tools below work without your laptop; the greyed-out groups (open apps, PowerShell, browser) need your computer connected via the Bridge."}
                 </p>
                 <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 8 }}>
-                  {LOCAL_TOOL_GROUPS.map((g) => (
-                    <label
-                      key={g.key}
-                      style={{ display: "flex", alignItems: "flex-start", gap: 8, fontSize: 13, cursor: "pointer" }}
-                      title={g.tools.join(", ")}
-                    >
-                      <input
-                        type="checkbox"
-                        checked={!disabledGroups.has(g.key)}
-                        onChange={(e) => toggleGroup(g.key, e.target.checked)}
-                        style={{ marginTop: 3 }}
-                      />
-                      <span>
-                        <span style={{ fontWeight: 600 }}>{g.label}</span>
-                        <span className="mono" style={{ opacity: 0.5, fontSize: 11 }}>
-                          {" "}· {g.tools.length} tool{g.tools.length === 1 ? "" : "s"}
+                  {LOCAL_TOOL_GROUPS.map((g) => {
+                    const unavailable = !!g.bridgeOnly && !presence.bridge;
+                    return (
+                      <label
+                        key={g.key}
+                        style={{
+                          display: "flex", alignItems: "flex-start", gap: 8, fontSize: 13,
+                          cursor: unavailable ? "not-allowed" : "pointer",
+                          opacity: unavailable ? 0.45 : 1,
+                        }}
+                        title={unavailable ? "Needs your computer (connect the Bridge)" : g.tools.join(", ")}
+                      >
+                        <input
+                          type="checkbox"
+                          checked={!disabledGroups.has(g.key) && !unavailable}
+                          disabled={unavailable}
+                          onChange={(e) => toggleGroup(g.key, e.target.checked)}
+                          style={{ marginTop: 3 }}
+                        />
+                        <span>
+                          <span style={{ fontWeight: 600 }}>{g.label}</span>
+                          <span className="mono" style={{ opacity: 0.5, fontSize: 11 }}>
+                            {" "}· {g.tools.length} tool{g.tools.length === 1 ? "" : "s"}
+                          </span>
+                          {unavailable && (
+                            <span className="mono" style={{ opacity: 0.6, fontSize: 11 }}> · needs your computer</span>
+                          )}
+                          <br />
+                          <span className="deck-hint" style={{ fontSize: 11 }}>{g.hint}</span>
                         </span>
-                        <br />
-                        <span className="deck-hint" style={{ fontSize: 11 }}>{g.hint}</span>
-                      </span>
-                    </label>
-                  ))}
+                      </label>
+                    );
+                  })}
                 </div>
               </div>
             )}

@@ -18,6 +18,13 @@ export type LocalToolGroup = {
   label: string;
   hint: string;
   tools: string[]; // tool names, must match lib/tools.ts toolDefs
+  // True when the group's tools can ONLY run through the local bridge (they touch
+  // the user's machine: launch apps, run PowerShell, drive the real browser). The
+  // cloud path can't fulfil these, so they're withheld from the cloud agent and
+  // shown greyed-out until the bridge is connected. Everything else (tasks, notes,
+  // calendar, projects, email, Spotify via the Web API, messaging, GitHub) runs
+  // server-side and works in the cloud with no laptop.
+  bridgeOnly?: boolean;
 };
 
 // Groups mirror the function names in lib/tools.ts `toolDefs`. Keep in sync if a
@@ -73,18 +80,21 @@ export const LOCAL_TOOL_GROUPS: LocalToolGroup[] = [
     label: "Browser tools",
     hint: "Drive your logged-in browser: open, snapshot, click/type, read.",
     tools: ["browser_open", "browser_snapshot", "browser_scroll", "browser_act", "browser_read"],
+    bridgeOnly: true,
   },
   {
     key: "apps",
     label: "Apps & folders",
     hint: "Open an app or folder on your computer (URLs go to the browser tools).",
     tools: ["open_app"],
+    bridgeOnly: true,
   },
   {
     key: "shell",
     label: "PowerShell",
     hint: "Developer mode: run a reviewed PowerShell command.",
     tools: ["run_shell"],
+    bridgeOnly: true,
   },
   {
     key: "messaging",
@@ -130,13 +140,24 @@ export function setGroupEnabled(key: string, enabled: boolean) {
   }
 }
 
-// The flat list of tool names the local loop may use right now (union of every
-// enabled group). Handed to /api/agent/prep so only these enter the schema.
-export function getEnabledLocalToolNames(): string[] {
+// The flat list of tool names that may be used right now (union of every enabled
+// group). Handed to /api/agent/prep (local loop) and /api/voice (cloud) so only
+// these enter the schema.
+//
+// When `bridgeAvailable` is false (the cloud-only path — no laptop reachable),
+// bridge-only groups are dropped: the cloud agent can't open apps / run shell /
+// drive the browser, so offering it those tools just produces actions that fail.
+// Defaults to true, so the local-loop callers behave exactly as before.
+export function getEnabledLocalToolNames(
+  opts: { bridgeAvailable?: boolean } = {}
+): string[] {
+  const bridgeAvailable = opts.bridgeAvailable ?? true;
   const disabled = getDisabledGroups();
   const out: string[] = [];
   for (const g of LOCAL_TOOL_GROUPS) {
-    if (!disabled.has(g.key)) out.push(...g.tools);
+    if (disabled.has(g.key)) continue;
+    if (g.bridgeOnly && !bridgeAvailable) continue;
+    out.push(...g.tools);
   }
   return out;
 }
