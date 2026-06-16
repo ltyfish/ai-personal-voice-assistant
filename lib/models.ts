@@ -24,7 +24,7 @@ export interface ModelDef {
 // the agent/router, so this list is safe to expand.
 export const MODELS: ModelDef[] = [
   { id: "openai/gpt-oss-120b", provider: "groq", label: "GPT-OSS 120B", tpd: 200_000, reasoning: true },
-  { id: "meta-llama/llama-4-maverick-17b-128e-instruct", provider: "nvidia", label: "Llama 4 Maverick" },
+  { id: "meta/llama-4-maverick-17b-128e-instruct", provider: "nvidia", label: "Llama 4 Maverick" },
   { id: "llama-3.3-70b-versatile", provider: "groq", label: "Llama 3.3 70B", tpd: 100_000 },
   { id: "qwen/qwen3-32b", provider: "groq", label: "Qwen3 32B", reasoning: true },
   { id: "gemini-2.5-flash", provider: "gemini", label: "Gemini 2.5 Flash", rpd: 250 },

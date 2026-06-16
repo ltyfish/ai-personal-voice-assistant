@@ -278,6 +278,18 @@ async function complete(
           exhausted.add(model.id);
           break;
         }
+        // Router-level 503: this model is in cooldown, or every key for its
+        // provider is rate-limited/unavailable RIGHT NOW. That's a property of
+        // one model, not the whole turn — rotate to the next model in the chain
+        // instead of aborting the request. (Without this, a single cooled model
+        // like a 404'd nvidia entry throws and kills the entire reply, even
+        // though groq/gemini are up.)
+        if (err?.status === 503 || /model cooldown|in cooldown|no available|all in cooldown/i.test(msg)) {
+          console.log(`[route] ⊘ ${model.id} in cooldown / no keys available — skip`);
+          lastErr = err;
+          exhausted.add(model.id);
+          break;
+        }
         throw err;
       }
     }

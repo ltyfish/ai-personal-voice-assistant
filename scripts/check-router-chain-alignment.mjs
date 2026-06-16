@@ -54,8 +54,8 @@ if (autoChain.join("\n") !== cloudChain.join("\n")) {
   process.exit(1);
 }
 
-if (!autoChain.includes("nvidia/meta-llama/llama-4-maverick-17b-128e-instruct")) {
-  console.error("FALLBACK_AUTO_CHAIN must include nvidia/meta-llama/llama-4-maverick-17b-128e-instruct.");
+if (!autoChain.includes("nvidia/meta/llama-4-maverick-17b-128e-instruct")) {
+  console.error("FALLBACK_AUTO_CHAIN must include nvidia/meta/llama-4-maverick-17b-128e-instruct.");
   process.exit(1);
 }
 

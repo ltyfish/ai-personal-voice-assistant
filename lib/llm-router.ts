@@ -469,7 +469,7 @@ export type RouteResult =
 export const FALLBACK_AUTO_CHAIN: string[] = [
   "groq/openai/gpt-oss-120b",
   "cerebras/gpt-oss-120b",
-  "nvidia/meta-llama/llama-4-maverick-17b-128e-instruct",
+  "nvidia/meta/llama-4-maverick-17b-128e-instruct",
   "groq/llama-3.3-70b-versatile",
   "groq/qwen/qwen3-32b",
   "google/gemini-2.5-flash",
