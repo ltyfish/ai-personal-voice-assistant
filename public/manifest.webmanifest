@@ -1,9 +1,16 @@
 {
-  "name": "Personal AI",
-  "short_name": "PersonalAI",
+  "name": "J.A.R.V.I.S. — Personal AI",
+  "short_name": "JARVIS",
   "start_url": "/",
   "display": "standalone",
-  "background_color": "#0a0a0a",
-  "theme_color": "#0a0a0a",
-  "icons": []
+  "background_color": "#05080c",
+  "theme_color": "#05080c",
+  "icons": [
+    {
+      "src": "/icon.svg",
+      "type": "image/svg+xml",
+      "sizes": "any",
+      "purpose": "any maskable"
+    }
+  ]
 }

@@ -1,9 +1,15 @@
 # MailMind scheduled jobs (external cron)
 
 PersonalAI runs on Vercel Hobby, whose built-in cron only fires once per day —
-too slow for email polling. Instead, an external scheduler pings the endpoints.
-[cron-job.org](https://cron-job.org) is free and supports 10-minute intervals
-plus custom headers.
+too slow for email polling. `vercel.json` registers both endpoints as native
+daily crons (a safety net; Vercel auto-attaches `Authorization: Bearer
+<CRON_SECRET>` when that env var is set). For real cadence, an external
+scheduler pings the endpoints: [cron-job.org](https://cron-job.org) is free and
+supports 10-minute intervals plus custom headers.
+
+Note: the digest endpoint now **fetches first, then reads** — it polls + summarizes
+the newest inbox before building the digest (pass `?fetch=0` to skip), so a single
+digest ping always summarizes fresh mail even if the standalone fetch job lapses.
 
 ## Prerequisites
 

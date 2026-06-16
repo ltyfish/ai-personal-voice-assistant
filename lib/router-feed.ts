@@ -5,15 +5,22 @@
 // /api/v1), so emitting one event per upstream decision here gives a complete
 // live rotation + token trace.
 //
-// This is a process-local in-memory ring buffer (no DB, no cost). It's read by
-// polling GET /api/router-feed?since=<lastId>, which the RouterFeed panel hits
-// every second. Token counts arrive a beat after the "served" line (usage is
-// parsed from a response clone), so they're emitted as their own follow-up
-// event keyed by the same model+key — the panel stitches them onto the row.
+// Storage is Postgres (table `router_events`). This MUST be durable across
+// instances: on a serverless deploy the /api/v1 (writer) and /api/router-feed
+// (reader) handlers run in DIFFERENT instances, so a process-local in-memory
+// buffer the writer fills is invisible to the reader and the panel stays empty
+// forever — exactly the "live rotation doesn't log on cloud" bug. Writing each
+// event to the shared DB fixes that; the reader polls GET /api/router-feed?since.
 //
-// Single-process only (fine for local dev + a single serverless instance); on a
-// multi-instance deploy each instance keeps its own recent feed, which is
-// acceptable for a live debug view.
+// To keep the request hot-path fast, pushes are fire-and-forget (we never await
+// the insert inside a proxied call) and ALSO mirrored into a small process-local
+// ring so same-instance/local reads are instant even before the insert lands.
+// Token counts arrive a beat after the "served" line (usage is parsed from a
+// response clone), so they're emitted as their own follow-up event keyed by the
+// same model+key — the panel stitches them onto the row.
+
+import { desc, gt, lt, sql } from "drizzle-orm";
+import { db, routerEvents } from "@/db";
 
 export type RouterEventKind =
   | "served" // an upstream call returned 2xx on this model+key
@@ -35,40 +42,115 @@ export type RouterEvent = {
   detail?: string; // short human note ("429 rate limit", "timed out 30s", …)
 };
 
-const MAX = 200;
+// Keep only the recent tail in the table so the append-only log can't grow
+// without bound; pruned opportunistically (see maybePrune).
+const KEEP_ROWS = 400;
+const PRUNE_EVERY = 50;
 
-// Pin the buffer on globalThis. In Next.js the /api/v1 (writer) and
-// /api/router-feed (reader) route handlers can be compiled into SEPARATE server
-// bundles, each with its own copy of a module-level `const buf = []` — so events
-// pushed by the proxy would land in a different array than the feed reads, and
-// the panel would stay empty forever. A globalThis-backed store is shared across
-// every bundle in the process, so writer and reader see the same ring buffer.
-type FeedStore = { buf: RouterEvent[]; seq: number };
+// Small process-local mirror so a reader hitting the SAME instance sees an event
+// instantly (and local dev still works if the DB write is briefly behind). The
+// DB is the source of truth across instances; this is just a latency shim.
+type FeedStore = { recent: RouterEvent[]; sincePrune: number };
 const g = globalThis as unknown as { __routerFeed?: FeedStore };
-const store: FeedStore = (g.__routerFeed ??= { buf: [], seq: 1 });
+const store: FeedStore = (g.__routerFeed ??= { recent: [], sincePrune: 0 });
 
-// Append one event; returns the assigned id. Never throws — feed bookkeeping
-// must not break a proxied request.
-export function pushRouterEvent(e: Omit<RouterEvent, "id" | "at">): number {
-  const id = store.seq++;
-  store.buf.push({ ...e, id, at: Date.now() });
-  if (store.buf.length > MAX) store.buf.splice(0, store.buf.length - MAX);
+function mapRow(r: typeof routerEvents.$inferSelect): RouterEvent {
+  return {
+    id: r.id,
+    at: Number(r.at),
+    kind: r.kind as RouterEventKind,
+    model: r.model,
+    key: r.apiKey ?? undefined,
+    status: r.status ?? undefined,
+    prompt: r.prompt ?? undefined,
+    completion: r.completion ?? undefined,
+    total: r.total ?? undefined,
+    detail: r.detail ?? undefined,
+  };
+}
+
+async function maybePrune() {
+  if (++store.sincePrune < PRUNE_EVERY) return;
+  store.sincePrune = 0;
+  try {
+    // Delete everything older than the newest KEEP_ROWS rows.
+    const cutoff = await db
+      .select({ id: routerEvents.id })
+      .from(routerEvents)
+      .orderBy(desc(routerEvents.id))
+      .limit(1)
+      .offset(KEEP_ROWS);
+    if (cutoff.length) await db.delete(routerEvents).where(lt(routerEvents.id, cutoff[0].id));
+  } catch {
+    /* best-effort */
+  }
+}
+
+// Append one event. Fire-and-forget: the DB insert is NOT awaited so it never
+// adds latency to (or can fail) a proxied request. Never throws.
+export function pushRouterEvent(e: Omit<RouterEvent, "id" | "at">): void {
+  const at = Date.now();
   // One concise line so the data path is visible in `npm run dev` even before the
   // UI panel is open. e.g. "[router-feed] served groq/openai/gpt-oss-120b key 3f12abcd".
   const tail = e.total != null ? `${e.total} tok` : e.detail ?? "";
   console.log(`[router-feed] ${e.kind} ${e.model}${e.key ? ` key ${e.key}` : ""}${tail ? ` — ${tail}` : ""}`);
-  return id;
+  void persist(e, at);
+}
+
+async function persist(e: Omit<RouterEvent, "id" | "at">, at: number) {
+  try {
+    const [row] = await db
+      .insert(routerEvents)
+      .values({
+        at,
+        kind: e.kind,
+        model: e.model,
+        apiKey: e.key ?? null,
+        status: e.status ?? null,
+        prompt: e.prompt ?? null,
+        completion: e.completion ?? null,
+        total: e.total ?? null,
+        detail: e.detail ?? null,
+      })
+      .returning();
+    if (row) {
+      store.recent.push(mapRow(row));
+      if (store.recent.length > KEEP_ROWS) store.recent.splice(0, store.recent.length - KEEP_ROWS);
+    }
+    await maybePrune();
+  } catch {
+    /* best-effort — a feed write must never break a proxied request */
+  }
 }
 
 // Events newer than `since` (exclusive), plus the current high-water id so the
-// poller can advance even when nothing new arrived. `since <= 0` returns the
-// whole buffer (a fresh panel's first load).
-export function getRouterEvents(since = 0): { events: RouterEvent[]; lastId: number } {
-  const events = since > 0 ? store.buf.filter((e) => e.id > since) : store.buf.slice();
-  return { events, lastId: store.seq - 1 };
+// poller can advance even when nothing new arrived. Reads the shared DB so the
+// feed is correct across serverless instances; falls back to the in-memory
+// mirror if the DB read fails.
+export async function getRouterEvents(since = 0): Promise<{ events: RouterEvent[]; lastId: number }> {
+  try {
+    const rows = since > 0
+      ? await db.select().from(routerEvents).where(gt(routerEvents.id, since)).orderBy(routerEvents.id)
+      : await db.select().from(routerEvents).orderBy(desc(routerEvents.id)).limit(KEEP_ROWS);
+    const events = (since > 0 ? rows : rows.slice().reverse()).map(mapRow);
+    const maxRow = await db.select({ max: sql<number>`max(${routerEvents.id})` }).from(routerEvents);
+    const lastId = Number(maxRow[0]?.max ?? 0) || events[events.length - 1]?.id || since;
+    return { events, lastId };
+  } catch {
+    const events = since > 0 ? store.recent.filter((e) => e.id > since) : store.recent.slice();
+    const lastId = store.recent.length ? store.recent[store.recent.length - 1].id : since;
+    return { events, lastId };
+  }
 }
 
-export function clearRouterEvents(): { lastId: number } {
-  store.buf.length = 0;
-  return { lastId: store.seq - 1 };
+export async function clearRouterEvents(): Promise<{ lastId: number }> {
+  store.recent.length = 0;
+  try {
+    const maxRow = await db.select({ max: sql<number>`max(${routerEvents.id})` }).from(routerEvents);
+    const lastId = Number(maxRow[0]?.max ?? 0);
+    await db.delete(routerEvents);
+    return { lastId };
+  } catch {
+    return { lastId: 0 };
+  }
 }

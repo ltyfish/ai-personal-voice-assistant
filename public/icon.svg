@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64">
+  <defs>
+    <radialGradient id="core" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#eafcff"/>
+      <stop offset="45%" stop-color="#7fe3ff"/>
+      <stop offset="100%" stop-color="#1aa7c8"/>
+    </radialGradient>
+    <radialGradient id="bg" cx="50%" cy="50%" r="60%">
+      <stop offset="0%" stop-color="#0b1620"/>
+      <stop offset="100%" stop-color="#05080c"/>
+    </radialGradient>
+  </defs>
+  <rect width="64" height="64" rx="14" fill="url(#bg)"/>
+  <!-- outer rotating ring -->
+  <circle cx="32" cy="32" r="22" fill="none" stroke="#2bd4ff" stroke-width="2" opacity="0.35"/>
+  <!-- segmented arc-reactor ring -->
+  <g stroke="#5fe6ff" stroke-width="3" stroke-linecap="round" opacity="0.85">
+    <path fill="none" d="M32 14 A18 18 0 0 1 49.1 26"/>
+    <path fill="none" d="M50 38 A18 18 0 0 1 36 49.6"/>
+    <path fill="none" d="M28 49.6 A18 18 0 0 1 14.9 26"/>
+  </g>
+  <!-- glowing core -->
+  <circle cx="32" cy="32" r="9" fill="url(#core)"/>
+  <circle cx="32" cy="32" r="9" fill="none" stroke="#eafcff" stroke-width="1" opacity="0.7"/>
+</svg>

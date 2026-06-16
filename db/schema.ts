@@ -227,3 +227,24 @@ export const llmUsage = pgTable(
 );
 
 export type LlmUsage = typeof llmUsage.$inferSelect;
+
+// ---- Router live-rotation feed ----
+// Append-only log of every routing decision the /v1 rotation proxy makes
+// (served/tokens/cooldown/nokeys/client_error). Persisted so the LIVE ROTATION
+// panel works on serverless, where the /api/v1 writer and /api/router-feed
+// reader run in SEPARATE instances that don't share process memory — an
+// in-memory ring buffer there stays empty forever. Pruned to the recent tail.
+export const routerEvents = pgTable("router_events", {
+  id: serial("id").primaryKey(),
+  at: bigint("at", { mode: "number" }).notNull(), // ms epoch
+  kind: text("kind").notNull(),
+  model: text("model").notNull(),
+  apiKey: text("api_key"), // short key id (first 8 chars)
+  status: integer("status"),
+  prompt: integer("prompt"),
+  completion: integer("completion"),
+  total: integer("total"),
+  detail: text("detail"),
+});
+
+export type RouterEventRow = typeof routerEvents.$inferSelect;

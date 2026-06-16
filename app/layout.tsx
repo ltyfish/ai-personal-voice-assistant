@@ -2,9 +2,15 @@ import type { Metadata, Viewport } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "Personal AI",
-  description: "Voice-driven tasks, notes and calendar",
+  title: "J.A.R.V.I.S.",
+  description: "Voice-driven tasks, notes, calendar and email assistant",
   manifest: "/manifest.webmanifest",
+  // app/icon.svg is auto-detected by Next for the favicon; declare apple-touch
+  // explicitly so iOS home-screen installs get the orb too.
+  icons: {
+    icon: "/icon.svg",
+    apple: "/icon.svg",
+  },
 };
 
 export const viewport: Viewport = {

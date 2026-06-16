@@ -16,8 +16,10 @@ const hud = read("components/ModelHud.tsx");
 const feed = read("components/RouterFeed.tsx");
 
 assert(
-  /clearRouterEvents/.test(feedLib) && /store\.buf\.length\s*=\s*0/.test(feedLib),
-  "router-feed store must expose a server-side clear that empties the ring buffer."
+  /clearRouterEvents/.test(feedLib) &&
+    /store\.recent\.length\s*=\s*0/.test(feedLib) &&
+    /db\.delete\(routerEvents\)/.test(feedLib),
+  "router-feed clear must empty the in-memory mirror AND the durable DB log (DB-backed so the feed survives across serverless instances)."
 );
 
 assert(

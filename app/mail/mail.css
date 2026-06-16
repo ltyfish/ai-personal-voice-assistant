@@ -817,27 +817,37 @@
   .main-content { padding:1rem; }
 }
 
+/* Phone nav: the inline tab pill can't fit, so hide it — every tab moves into
+   the hamburger (see MailApp `menuTabs`). Keep the brand pill centred and the
+   burger pinned top-right. Matches the 760px JS breakpoint in MailApp/ModelHud. */
+@media (max-width:760px) {
+  .nav-links { display:none !important; }
+  .navbar {
+    width:auto; max-width:calc(100% - 5.5rem);
+    margin:.75rem auto 0;
+    padding:.45rem .55rem .45rem 1rem;
+  }
+  .nav-brand { margin-right:0; font-size:.78rem; }
+  .nav-more { top:.85rem; right:1rem; }
+  /* The burger now holds every tab — keep the menu on-screen and scrollable. */
+  .nav-more-menu { max-height:72vh; overflow-y:auto; min-width:170px; }
+  .nav-more-item { padding:.6rem .85rem; font-size:.82rem; }
+  .layout { min-height:calc(100dvh - 48px); }
+  /* Orb stage: leave room for the typed-command box + deck below it, and never
+     overflow the viewport width. */
+  .jarvis-orb { width:min(64vmin, 360px); }
+  .jarvis-center { gap:1rem; min-height:calc(100dvh - 48px - 2.5rem); }
+  .jarvis-stage { min-height:calc(100dvh - 48px - 2.5rem); }
+}
+
 @media (max-width:640px) {
   /* Prevent horizontal overflow globally */
   .mailmind { overflow-x:hidden; }
 
-  /* Two-row navbar: brand+toggle on top, tabs below */
+  /* Navbar holds just the brand pill now (tabs are in the hamburger). */
   .navbar {
-    flex-wrap: wrap;
     height: auto;
-    padding: .5rem 1rem .4rem;
     gap: .35rem;
-  }
-  .nav-brand { flex:1; }
-  .nav-links {
-    order: 3;
-    width: 100%;
-  }
-  .nav-link {
-    flex: 1;
-    text-align: center;
-    padding: .3rem .25rem;
-    font-size: .72rem;
   }
 
   /* Content */

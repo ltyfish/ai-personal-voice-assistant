@@ -64,6 +64,16 @@ export default function MailApp({
   const [ready, setReady] = useState(false);
   const [moreOpen, setMoreOpen] = useState(false);
   const moreRef = useRef<HTMLDivElement | null>(null);
+  // On phones the inline tab pill can't fit; below this width we hide it and the
+  // hamburger holds the FULL tab list instead (a standard mobile nav).
+  const [isNarrow, setIsNarrow] = useState(false);
+  useEffect(() => {
+    const mq = window.matchMedia("(max-width: 760px)");
+    const apply = () => setIsNarrow(mq.matches);
+    apply();
+    mq.addEventListener("change", apply);
+    return () => mq.removeEventListener("change", apply);
+  }, []);
 
   // Local-computer presence — drives whether the "Local" tab is shown at all.
   // Offline (computer off / bridge down) → tab hidden, Jarvis stays cloud-only.
@@ -143,7 +153,9 @@ export default function MailApp({
   ];
   const primaryTabs = TABS.filter((t) => !MORE_TAB_IDS.has(t.id));
   const moreTabs = TABS.filter((t) => MORE_TAB_IDS.has(t.id));
-  const moreActive = moreTabs.some((t) => t.id === tab);
+  // On phones the inline pill is hidden, so the hamburger must list EVERY tab.
+  const menuTabs = isNarrow ? TABS : moreTabs;
+  const moreActive = menuTabs.some((t) => t.id === tab);
 
   if (!ready) return <div className="mailmind" data-theme={theme} />;
 
@@ -176,8 +188,10 @@ export default function MailApp({
         </div>
       </nav>
 
-      {/* Hamburger lives in its own nav, pinned to the far right of the screen. */}
-      {moreTabs.length > 0 && (
+      {/* Hamburger lives in its own nav, pinned to the far right of the screen.
+          On desktop it holds the overflow ("more") tabs; on mobile the inline
+          pill is hidden and this holds EVERY tab. */}
+      {menuTabs.length > 0 && (
         <div className="nav-more" ref={moreRef}>
           <button
             className={`nav-burger${moreOpen ? " open" : ""}${moreActive ? " active" : ""}`}
@@ -193,7 +207,7 @@ export default function MailApp({
           </button>
           {moreOpen && (
             <div className="nav-more-menu" role="menu">
-              {moreTabs.map((t) => (
+              {menuTabs.map((t) => (
                 <a
                   key={t.id}
                   href={`#${t.id}`}
@@ -202,6 +216,8 @@ export default function MailApp({
                   onClick={(e) => {
                     e.preventDefault();
                     selectTab(t.id);
+                    // On mobile the menu IS the nav, so collapse it after picking.
+                    if (isNarrow) setMoreOpen(false);
                   }}
                 >
                   {t.label}

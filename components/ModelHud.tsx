@@ -80,6 +80,28 @@ export default function ModelHud() {
   const drag = useRef<{ dx: number; dy: number } | null>(null);
   const resizing = useRef<{ x: number; y: number; w: number; h: number } | null>(null);
 
+  // On phones the free-floating, draggable, fixed-size pad covers the whole
+  // screen (it can't be dragged off-canvas reliably and ignores viewport width).
+  // Below this width we dock it as a bottom sheet: full-width, capped height, no
+  // drag/resize, collapsed by default so it never hides the orb.
+  const [mobile, setMobile] = useState(false);
+  useEffect(() => {
+    const mq = window.matchMedia("(max-width: 760px)");
+    const apply = () => setMobile(mq.matches);
+    apply();
+    mq.addEventListener("change", apply);
+    return () => mq.removeEventListener("change", apply);
+  }, []);
+  // Collapse to the slim header the first time we enter mobile, so it opens as an
+  // unobtrusive bar the user can tap to expand — not a full-screen overlay.
+  const didMobileCollapse = useRef(false);
+  useEffect(() => {
+    if (mobile && !didMobileCollapse.current) {
+      didMobileCollapse.current = true;
+      setCollapsed(true);
+    }
+  }, [mobile]);
+
   // Live rotation feed (per-model token usage as the proxy rotates).
   const [rows, setRows] = useState<Row[]>([]);
   const [paused, setPaused] = useState(false);
@@ -190,6 +212,7 @@ export default function ModelHud() {
 
   // Pointer-drag the pad by its header; persist the final position.
   const onPointerDown = (e: React.PointerEvent) => {
+    if (mobile) return; // docked bottom sheet — no dragging
     const el = padRef.current;
     if (!el) return;
     const rect = el.getBoundingClientRect();
@@ -215,6 +238,7 @@ export default function ModelHud() {
 
   // Pointer-resize from the bottom-right grip; clamp to bounds, persist on release.
   const onResizeDown = (e: React.PointerEvent) => {
+    if (mobile) return; // docked bottom sheet — fixed size
     e.stopPropagation();
     resizing.current = { x: e.clientX, y: e.clientY, w: size.w, h: size.h };
     (e.target as HTMLElement).setPointerCapture(e.pointerId);
@@ -264,10 +288,31 @@ export default function ModelHud() {
 
   const feed = rows.slice().reverse();
 
-  return (
-    <div
-      ref={padRef}
-      style={{
+  const containerStyle: React.CSSProperties = mobile
+    ? {
+        // Docked bottom sheet: spans the screen width, sits above the safe-area
+        // inset, height grows with content up to ~55vh so it never blankets the
+        // page or covers the orb when collapsed.
+        position: "fixed",
+        left: 8,
+        right: 8,
+        bottom: "calc(8px + env(safe-area-inset-bottom, 0px))",
+        zIndex: 9000,
+        maxHeight: "55vh",
+        height: collapsed ? undefined : "auto",
+        display: "flex",
+        flexDirection: "column",
+        background: "var(--card, #0d1b24)",
+        border: `1px solid ${accent}55`,
+        borderRadius: 14,
+        boxShadow: "0 -8px 28px rgba(0,0,0,0.5)",
+        color: "var(--text, #cfe9e6)",
+        fontSize: 12,
+        userSelect: "none",
+        overflow: "hidden",
+        backdropFilter: "blur(8px)",
+      }
+    : {
         position: "fixed",
         left: state.pos.x,
         top: state.pos.y,
@@ -285,8 +330,10 @@ export default function ModelHud() {
         userSelect: "none",
         overflow: "hidden",
         backdropFilter: "blur(4px)",
-      }}
-    >
+      };
+
+  return (
+    <div ref={padRef} style={containerStyle}>
       {/* Header — drag handle + controls */}
       <div
         onPointerDown={onPointerDown}
@@ -297,7 +344,7 @@ export default function ModelHud() {
           alignItems: "center",
           gap: 6,
           padding: "6px 8px",
-          cursor: "grab",
+          cursor: mobile ? "default" : "grab",
           background: `${accent}14`,
           borderBottom: `1px solid ${accent}33`,
           flexShrink: 0,
@@ -457,6 +504,7 @@ export default function ModelHud() {
             onPointerUp={onResizeUp}
             title="Drag to resize"
             style={{
+              display: mobile ? "none" : "block",
               position: "absolute",
               right: 0,
               bottom: 0,
