@@ -2443,6 +2443,15 @@ input[type="range"].deck-range {
 /* Calendar — note items */
 .cal-chip.note { background:rgba(180,160,255,.12); color:#cdbcff; border-left:2px solid #b4a0ff; }
 .cal-dot.note { background:#b4a0ff; box-shadow:0 0 8px rgba(180,160,255,.6); }
+.cal-chip.improvement { background:rgba(94,234,212,.12); color:#5eead4; border-left:2px solid #5eead4; }
+.cal-dot.improvement { background:#5eead4; box-shadow:0 0 8px rgba(94,234,212,.6); }
+.cal-chip.subtask { background:rgba(255,210,63,.08); color:var(--u3c); border-left:2px dashed var(--u3c); }
+.cal-dot.subtask { background:var(--u3c); opacity:.7; }
+.cal-day-tag {
+  font-size:10px; font-weight:600; text-transform:uppercase; letter-spacing:.04em;
+  padding:1px 5px; border-radius:4px; background:rgba(167,139,250,.16); color:#c4b5fd;
+}
+.proj-imp-dates { display:flex; flex-wrap:wrap; gap:4px; align-items:center; }
 
 /* Projects — per-improvement time */
 .proj-imp { flex-direction:column; align-items:stretch; gap:.4rem; }

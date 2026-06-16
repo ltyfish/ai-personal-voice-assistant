@@ -117,13 +117,15 @@ type Budget = {
   timeoutMs: number;
   cdRateLimit: number;
   cdClientError: number;
+  maxKeysPerModel: number; // 0 = walk every available key
 };
 function newBudget(
   timeoutMs: number,
   cdRateLimit: number,
   cdClientError: number,
+  maxKeysPerModel: number,
 ): Budget {
-  return { timeoutMs, cdRateLimit, cdClientError };
+  return { timeoutMs, cdRateLimit, cdClientError, maxKeysPerModel };
 }
 
 function splitModel(model: string): { platform: string; upstreamModel: string } | null {
@@ -268,6 +270,39 @@ async function markModelCooldown(platform: string, model: string, ms: number, de
   } catch {
     /* best-effort: key cooldown still protects rotation */
   }
+}
+
+// All model-level cooldowns still in effect, keyed by the normalized model id
+// (the same id markModelCooldown stores). Used by the LLM-Keys dashboard to show
+// which MODELS are currently cooled (vs. the per-KEY cooldown badge). The caller
+// matches a catalog model via normalizeModelCooldownCatalogId().
+export async function getActiveModelCooldowns(): Promise<
+  Record<string, { until: string; detail: string }>
+> {
+  try {
+    const rows = await db
+      .select({ key: mailKv.key, value: mailKv.value })
+      .from(mailKv)
+      .where(eq(mailKv.namespace, MODEL_COOLDOWN_NS));
+    const now = Date.now();
+    const out: Record<string, { until: string; detail: string }> = {};
+    for (const r of rows) {
+      const v = r.value as { until?: string; detail?: string } | undefined;
+      const untilMs = v?.until ? new Date(v.until).getTime() : 0;
+      if (!untilMs || untilMs <= now) continue;
+      // Normalize the stored key too (legacy keys were "platform/model").
+      out[normalizeModelCooldownId(r.key)] = { until: v!.until!, detail: v?.detail || "model cooldown" };
+    }
+    return out;
+  } catch {
+    return {};
+  }
+}
+
+// Exposed so the dashboard can map a catalog model id to the same normalized id
+// the cooldown store uses.
+export function normalizeModelCooldownCatalogId(model: string): string {
+  return normalizeModelCooldownId(model);
 }
 
 async function filterAvailableModels(candidates: string[]): Promise<string[]> {
@@ -588,6 +623,7 @@ export async function routeChatCompletion(body: any): Promise<RouteResult> {
     cfg.timeoutMs,
     cfg.cooldownRateLimitMs,
     cfg.cooldownClientErrorMs,
+    cfg.maxKeysPerModel,
   );
 
   // "auto" → rotate across the native model catalog. Each candidate gets exhaustive key
@@ -659,9 +695,12 @@ async function routeOne(
     };
   }
 
-  const keys = await candidateKeys(platform);
+  const allKeys = await candidateKeys(platform);
+  // Cap how many keys we try for this model on one call (0 = every key). LRU
+  // order means the freshest keys are tried first within the cap.
+  const keys = budget.maxKeysPerModel > 0 ? allKeys.slice(0, budget.maxKeysPerModel) : allKeys;
   console.log(
-    `[llm-router] ${platform}/${upstreamModel} — ${keys.length} key(s) available (LRU rotation)`
+    `[llm-router] ${platform}/${upstreamModel} — trying ${keys.length}/${allKeys.length} key(s) (LRU rotation)`
   );
   if (keys.length === 0) {
     pushRouterEvent({ kind: "nokeys", model: `${platform}/${upstreamModel}`, detail: "none enabled / all in cooldown" });

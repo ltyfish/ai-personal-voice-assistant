@@ -66,8 +66,10 @@ export const projects = pgTable("projects", {
   // Optional scheduled time per improvement, keyed by the improvement's text →
   // ISO string. Separate from `improvements` so the voice agent (which treats
   // improvements as a plain string[]) is unaffected. UI-managed only.
+  // Value is either a legacy bare ISO start string, or { start, end? }. UI
+  // normalizes on read; the voice agent never touches this field.
   improvementTimes: jsonb("improvement_times")
-    .$type<Record<string, string>>()
+    .$type<Record<string, string | { start: string; end?: string }>>()
     .notNull()
     .default({}),
   done: boolean("done").notNull().default(false),

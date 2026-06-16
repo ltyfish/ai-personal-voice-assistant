@@ -21,12 +21,18 @@ export type RouterConfig = {
   // 404 …). Default 1 day — a model that's rejecting requests shouldn't keep
   // getting rotated to.
   cooldownClientErrorMs: number;
+  // Max keys the router tries for ONE model on a single call before giving up on
+  // it (and the caller fails over to the next model). 0 = walk EVERY available
+  // key (the original behaviour). A small cap makes a dead/throttled provider
+  // fail over faster instead of burning through all its keys.
+  maxKeysPerModel: number;
 };
 
 export const ROUTER_DEFAULTS: RouterConfig = {
   timeoutMs: 30_000,
   cooldownRateLimitMs: 30 * 60_000, // 30 min
   cooldownClientErrorMs: 24 * 60 * 60_000, // 1 day
+  maxKeysPerModel: 0, // 0 = walk every available key
 };
 
 // Bounds keep the UI sliders sane and stop a bad value from hanging requests.
@@ -34,6 +40,7 @@ export const ROUTER_LIMITS = {
   timeoutMs: { min: 5_000, max: 120_000 },
   cooldownRateLimitMs: { min: 60_000, max: 6 * 60 * 60_000 }, // 1 min … 6 h
   cooldownClientErrorMs: { min: 60_000, max: 7 * 24 * 60 * 60_000 }, // 1 min … 7 d
+  maxKeysPerModel: { min: 0, max: 20 }, // 0 = unlimited
 };
 
 function clamp(n: number, min: number, max: number, fallback: number): number {
@@ -61,6 +68,12 @@ function normalize(v: Partial<RouterConfig> | null): RouterConfig {
       ROUTER_LIMITS.cooldownClientErrorMs.max,
       ROUTER_DEFAULTS.cooldownClientErrorMs,
     ),
+    maxKeysPerModel: clamp(
+      Number(v?.maxKeysPerModel),
+      ROUTER_LIMITS.maxKeysPerModel.min,
+      ROUTER_LIMITS.maxKeysPerModel.max,
+      ROUTER_DEFAULTS.maxKeysPerModel,
+    ),
   };
 }
 
@@ -78,7 +91,16 @@ export async function getRouterConfig(): Promise<RouterConfig> {
 }
 
 export async function saveRouterConfig(input: Partial<RouterConfig>): Promise<RouterConfig> {
-  const cfg = normalize(input);
+  // Merge over the current config so a partial update (e.g. just the timeout
+  // slider) never resets the other knobs back to their defaults. Only keys with
+  // a defined value override current — undefined fields (omitted by the caller)
+  // must not blow away an existing value.
+  const current = await getRouterConfig();
+  const defined: Partial<RouterConfig> = {};
+  for (const [k, v] of Object.entries(input)) {
+    if (v !== undefined) (defined as Record<string, unknown>)[k] = v;
+  }
+  const cfg = normalize({ ...current, ...defined });
   await db
     .insert(mailKv)
     .values({ namespace: NS, key: KEY, value: cfg as object })

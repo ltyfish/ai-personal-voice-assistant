@@ -16,6 +16,7 @@ import { computeModelStatus } from "./model-status";
 import { getMemory, renderMemoryMarkdown } from "./memory";
 import { GENERIC_RULES } from "./ollama-context";
 import { getBehavior } from "./behavior";
+import { getRecentTurns } from "./continuity";
 
 // The user's "about me" facts as a markdown block for the cloud prompt. Best-effort
 // — a DB failure returns "" so a turn never breaks over missing memory.
@@ -1039,10 +1040,14 @@ async function planTurn(
 
   let systemContent: string;
   let contextContent = "";
+  // (cloud continuity is appended to contextContent after the branch below)
   if (clarify) {
     systemContent = clarifyPrompt(clarify.label, clarify.options);
   } else if (chat) {
-    systemContent = `${CHAT_PROMPT}\n\n${dateLine()}`;
+    // Keep the chat persona static (cacheable); the date is volatile, so it rides
+    // the context tail like the tool path's date/snapshot.
+    systemContent = CHAT_PROMPT;
+    contextContent = dateLine();
   } else if (onlyPreset) {
     systemContent = ""; // no model tool pass — preset calls run directly below
   } else {
@@ -1064,6 +1069,14 @@ async function planTurn(
     });
     systemContent = sp.system;
     contextContent = sp.context;
+  }
+
+  // Cloud short-term continuity (the LOCAL path uses activity.md via the prep route
+  // instead). Appended to the END of the VOLATILE tail so it never breaks the
+  // cacheable static prefix + tool schema.
+  if (!opts?.allTools && !onlyPreset) {
+    const convo = await getRecentTurns();
+    if (convo) contextContent = contextContent ? `${contextContent}\n\n${convo}` : convo;
   }
 
   return {
@@ -1096,6 +1109,7 @@ export async function prepareTurn(
   opts?: { userProfile?: string; useSnapshot?: boolean; allTools?: boolean; enabledTools?: string[] }
 ): Promise<{
   system: string;
+  context: string;
   tools: any[];
   chat: boolean;
   onlyPreset: boolean;
@@ -1103,13 +1117,12 @@ export async function prepareTurn(
   routing: AgentResult["routing"];
 }> {
   const plan = await planTurn(userText, opts);
-  // Local runs on the user's own GPU — no provider cache to court — so fold the
-  // volatile context back into the single system string the client loop expects.
-  const system = [plan.systemContent, plan.contextContent]
-    .filter(Boolean)
-    .join("\n\n");
+  // Keep the STATIC prefix and the VOLATILE tail separate so the local client loop
+  // can send them as two system messages — the static prefix + tool schema then
+  // form a cacheable head the router's provider can reuse across turns.
   return {
-    system,
+    system: plan.systemContent,
+    context: plan.contextContent,
     tools: plan.tools,
     chat: plan.chat,
     onlyPreset: plan.onlyPreset,

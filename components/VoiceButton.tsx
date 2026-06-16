@@ -717,6 +717,7 @@ export default function VoiceButton({ onDone }: { onDone: () => void }) {
     const resp = await runLocalTurn(text, presenceRef.current, {
       userProfile: getUserProfile(),
       useSnapshot: useSnapshotRef.current,
+      maxWords: maxWordsRef.current,
     });
     // NO cloud fallback: local and cloud hit the SAME rotating /api/v1 keys, so a
     // failure (rate-limited, router down) would just fail the same way on cloud —
@@ -1591,17 +1592,22 @@ export default function VoiceButton({ onDone }: { onDone: () => void }) {
 
   // Re-open the mic for the next turn of a live session, after Jarvis finishes
   // speaking. Deferred a tick so the request's `finally` can settle to idle.
-  function continueLiveSession() {
+  function continueLiveSession(attempt = 0) {
     if (!liveSessionRef.current) return;
     setTimeout(() => {
       if (!liveSessionRef.current) return;
-      // Don't barge into a confirm flow; thinking will settle to idle here.
-      if (statusRef.current !== "idle" && statusRef.current !== "thinking") return;
-      setStatusBoth("idle");
+      // Only re-open the mic when JARVIS is idle — a live session must listen
+      // continuously EXCEPT while it's thinking/recording/speaking. If we're not
+      // idle yet (still finishing a turn, a confirm, or speaking), wait and try
+      // again instead of giving up, so the loop never silently dies mid-session.
+      if (statusRef.current !== "idle") {
+        if (attempt < 100) continueLiveSession(attempt + 1); // ~ up to 30s of waiting
+        return;
+      }
       engineRef.current?.pause();
       captureModeRef.current = "command";
       void startRecording(true);
-    }, 200);
+    }, 300);
   }
 
   function toggleLiveSession() {

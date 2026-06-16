@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prepareTurn } from "@/lib/agent";
-import { readOllamaContext, writeToolSchema, syncMemoryFile, syncBehaviorFile } from "@/lib/ollama-context";
+import { readOllamaContextSplit, writeToolSchema, syncMemoryFile, syncBehaviorFile } from "@/lib/ollama-context";
 
 export const runtime = "nodejs";
 export const maxDuration = 30;
@@ -31,8 +31,12 @@ export async function POST(req: NextRequest) {
     // Mirror "about me" (DB→file) and push the vault's behavior.md (file→DB) so the
     // cloud path reads the SAME rules. Both best-effort; run concurrently.
     await Promise.all([syncMemoryFile(), syncBehaviorFile()]);
-    const ctx = readOllamaContext();
-    if (ctx) prep.system = `${ctx}\n\n${prep.system}`;
+    // STATIC local context (behavior + about-me) goes on TOP of the system prompt so
+    // it sits in the cacheable head with the tool schema; VOLATILE context (recent
+    // activity) goes at the END of the volatile tail so it doesn't poison the cache.
+    const { staticPart, volatilePart } = readOllamaContextSplit();
+    if (staticPart) prep.system = `${staticPart}\n\n${prep.system}`;
+    if (volatilePart) prep.context = [prep.context, volatilePart].filter(Boolean).join("\n\n");
     // Expose the live tool schema in Obsidian: exactly the tools sent this turn
     // are flagged enabled, so unchecking a group is visibly reflected.
     try {

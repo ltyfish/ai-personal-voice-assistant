@@ -48,15 +48,21 @@ type Note = {
   date: string | null;
   updatedAt: string;
 };
+// An improvement's scheduled time: legacy bare ISO start string, or {start,end?}.
+type ImpTime = string | { start: string; end?: string };
 type Project = {
   id: string;
   seq: number;
   title: string;
   improvements: string[];
-  improvementTimes: Record<string, string>;
+  improvementTimes: Record<string, ImpTime>;
   done: boolean;
   updatedAt: string;
 };
+const impStartIso = (v: ImpTime | undefined): string =>
+  typeof v === "string" ? v : v?.start ?? "";
+const impEndIso = (v: ImpTime | undefined): string =>
+  typeof v === "string" ? "" : v?.end ?? "";
 
 const fmt = (iso: string | null) =>
   iso ? new Date(iso).toLocaleString([], { dateStyle: "medium", timeStyle: "short" }) : "";
@@ -77,19 +83,22 @@ export default function Home() {
   const [events, setEvents] = useState<Event[]>([]);
   const [notes, setNotes] = useState<Note[]>([]);
   const [projects, setProjects] = useState<Project[]>([]);
+  const [subtasks, setSubtasks] = useState<Subtask[]>([]);
 
   const refresh = useCallback(async () => {
     const opts: RequestInit = { cache: "no-store" };
-    const [t, e, n, p] = await Promise.all([
+    const [t, e, n, p, s] = await Promise.all([
       fetch("/api/tasks", opts).then((r) => r.json()),
       fetch("/api/events", opts).then((r) => r.json()),
       fetch("/api/notes", opts).then((r) => r.json()),
       fetch("/api/projects", opts).then((r) => r.json()),
+      fetch("/api/subtasks", opts).then((r) => r.json()),
     ]);
     setTasks(t);
     setEvents(e);
     setNotes(n);
     setProjects(p);
+    setSubtasks(s);
   }, []);
 
   useEffect(() => {
@@ -111,7 +120,7 @@ export default function Home() {
   const tasksTab = <TasksPanel tasks={tasks} refresh={refresh} />;
 
   const calendarTab = (
-    <CalendarPanel events={events} tasks={tasks} notes={notes} refresh={refresh} />
+    <CalendarPanel events={events} tasks={tasks} notes={notes} projects={projects} subtasks={subtasks} refresh={refresh} />
   );
 
   const notesTab = <NotesPanel notes={notes} refresh={refresh} />;
@@ -158,6 +167,8 @@ const dkey = (d: Date) =>
   `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 const sameDay = (a: Date, b: Date) => dkey(a) === dkey(b);
 const timeStr = (d: Date) => d.toLocaleTimeString([], { timeStyle: "short" });
+const dateTimeStr = (d: Date) =>
+  d.toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
 
 /* ───────────────────────── Tasks — to-do list ───────────────────────── */
 function TasksPanel({ tasks, refresh }: { tasks: Task[]; refresh: () => void }) {
@@ -260,6 +271,7 @@ function TasksPanel({ tasks, refresh }: { tasks: Task[]; refresh: () => void }) 
     });
     setSubDraft("");
     loadSubs();
+    refresh(); // keep the calendar's subtask copy in sync
   };
   const patchSub = async (id: string, body: object) => {
     await fetch(`/api/subtasks/${id}`, {
@@ -268,10 +280,12 @@ function TasksPanel({ tasks, refresh }: { tasks: Task[]; refresh: () => void }) 
       body: JSON.stringify(body),
     });
     loadSubs();
+    refresh();
   };
   const delSub = async (id: string) => {
     await fetch(`/api/subtasks/${id}`, { method: "DELETE" });
     loadSubs();
+    refresh();
   };
 
   const row = (t: Task) => {
@@ -455,19 +469,36 @@ type DayItem =
       recurrence: Recurrence;
       done: boolean;
       project: boolean;
+      // For multi-day PROJECT events: which endpoint this chip represents.
+      edge?: "start" | "end";
     }
   | { kind: "task"; id: string; seq: number; title: string; due: Date; done: boolean; priority: string }
-  | { kind: "note"; id: string; seq: number; title: string; date: Date };
+  | { kind: "subtask"; id: string; title: string; parentTitle: string; due: Date; done: boolean; priority: string }
+  | { kind: "note"; id: string; seq: number; title: string; date: Date }
+  | {
+      kind: "improvement";
+      id: string;
+      projectTitle: string;
+      title: string;
+      start: Date;
+      end: Date;
+      // "single" when start/end share a day; otherwise one chip per endpoint.
+      edge: "start" | "end" | "single";
+    };
 
 function CalendarPanel({
   events,
   tasks,
   notes,
+  projects,
+  subtasks,
   refresh,
 }: {
   events: Event[];
   tasks: Task[];
   notes: Note[];
+  projects: Project[];
+  subtasks: Subtask[];
   refresh: () => void;
 }) {
   const today = new Date();
@@ -483,8 +514,9 @@ function CalendarPanel({
   const [start, setStart] = useState("");
   const [end, setEnd] = useState("");
   const [recurrence, setRecurrence] = useState<Recurrence>("none");
-  // inline edit
+  // inline edit — shared form reused for events, project improvements and subtasks
   const [editId, setEditId] = useState<string | null>(null);
+  const [editKind, setEditKind] = useState<"event" | "improvement" | "subtask" | null>(null);
   const [eTitle, setETitle] = useState("");
   const [eStart, setEStart] = useState("");
   const [eEnd, setEEnd] = useState("");
@@ -529,21 +561,85 @@ function CalendarPanel({
     await fetch(`/api/tasks/${id}`, { method: "DELETE" });
     refresh();
   };
+  const patchSubtask = async (id: string, body: object) => {
+    await fetch(`/api/subtasks/${id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    refresh();
+  };
+  const delSubtask = async (id: string) => {
+    await fetch(`/api/subtasks/${id}`, { method: "DELETE" });
+    refresh();
+  };
+  // Improvement calendar items aren't DB rows — they live in a project's
+  // improvementTimes map (id = `${projectId}:${improvementText}`). Editing or
+  // deleting one just rewrites that map on the parent project.
+  const splitImpId = (id: string): { projectId: string; imp: string } => {
+    const i = id.indexOf(":");
+    return { projectId: id.slice(0, i), imp: id.slice(i + 1) };
+  };
+  const patchImprovementTime = async (id: string, time: ImpTime | null) => {
+    const { projectId, imp } = splitImpId(id);
+    const p = projects.find((pr) => pr.id === projectId);
+    if (!p) return;
+    const times = { ...(p.improvementTimes ?? {}) };
+    if (time === null) delete times[imp];
+    else times[imp] = time;
+    await fetch(`/api/projects/${projectId}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ improvementTimes: times }),
+    });
+    refresh();
+  };
 
+  const cancelEdit = () => {
+    setEditId(null);
+    setEditKind(null);
+  };
   const openEdit = (id: string, t: string, s: Date, e: Date) => {
+    setEditKind("event");
     setEditId(id);
     setETitle(t);
     setEStart(toLocalInput(s));
     setEEnd(toLocalInput(e));
   };
+  const openEditImprovement = (id: string, t: string, s: Date, e: Date) => {
+    setEditKind("improvement");
+    setEditId(id);
+    setETitle(t);
+    setEStart(toLocalInput(s));
+    setEEnd(toLocalInput(e));
+  };
+  const openEditSubtask = (id: string, t: string, due: Date) => {
+    setEditKind("subtask");
+    setEditId(id);
+    setETitle(t);
+    setEStart(toLocalInput(due));
+    setEEnd("");
+  };
   const saveEdit = async () => {
     if (!editId) return;
-    await patchEvent(editId, {
-      title: eTitle,
-      startTime: new Date(eStart).toISOString(),
-      endTime: new Date(eEnd).toISOString(),
-    });
-    setEditId(null);
+    if (editKind === "subtask") {
+      await patchSubtask(editId, {
+        title: eTitle,
+        dueDate: eStart ? new Date(eStart).toISOString() : null,
+      });
+    } else if (editKind === "improvement") {
+      await patchImprovementTime(editId, {
+        start: new Date(eStart).toISOString(),
+        end: eEnd ? new Date(eEnd).toISOString() : new Date(new Date(eStart).getTime() + 3600000).toISOString(),
+      });
+    } else {
+      await patchEvent(editId, {
+        title: eTitle,
+        startTime: new Date(eStart).toISOString(),
+        endTime: new Date(eEnd).toISOString(),
+      });
+    }
+    cancelEdit();
   };
 
   const pickDay = (d: Date) => {
@@ -578,17 +674,27 @@ function CalendarPanel({
   };
   for (const occ of expandEvents(events, gridStart, rangeEnd)) {
     const s = new Date(occ.startTime);
-    push(s, {
-      kind: "event",
+    const e = new Date(occ.endTime);
+    const isProject = !!eventProject.get(occ.id);
+    const base = {
+      kind: "event" as const,
       id: occ.id,
       seq: (occ as unknown as { seq: number }).seq,
       title: occ.title,
       start: s,
-      end: new Date(occ.endTime),
+      end: e,
       recurrence: (occ.recurrence ?? "none") as Recurrence,
       done: !!eventDone.get(occ.id),
-      project: !!eventProject.get(occ.id),
-    });
+      project: isProject,
+    };
+    // PROJECT events that span more than one day show a separate chip on the
+    // start date AND the end date; same-day (and non-project) events show once.
+    if (isProject && dkey(s) !== dkey(e)) {
+      if (s >= gridStart && s <= rangeEnd) push(s, { ...base, edge: "start" });
+      if (e >= gridStart && e <= rangeEnd) push(e, { ...base, edge: "end" });
+    } else {
+      push(s, base);
+    }
   }
   for (const t of tasks) {
     if (!t.dueDate) continue;
@@ -604,6 +710,23 @@ function CalendarPanel({
         priority: t.priority,
       });
   }
+  // Subtasks with a due date are projected like tasks, tagged with their parent
+  // task's title so the calendar shows where the checklist item belongs.
+  const taskTitle = new Map(tasks.map((t) => [t.id, t.title]));
+  for (const st of subtasks) {
+    if (!st.dueDate) continue;
+    const due = new Date(st.dueDate);
+    if (due >= gridStart && due <= rangeEnd)
+      push(due, {
+        kind: "subtask",
+        id: st.id,
+        title: st.title,
+        parentTitle: taskTitle.get(st.taskId) ?? "",
+        due,
+        done: st.done,
+        priority: st.priority,
+      });
+  }
   for (const n of notes) {
     if (!n.date) continue;
     const d = new Date(n.date);
@@ -616,8 +739,42 @@ function CalendarPanel({
         date: d,
       });
   }
+  // Per-improvement scheduled times (project.improvementTimes) are projected as
+  // read-only calendar items, same as tasks/notes — they're not DB events, so a
+  // scheduled improvement still shows on the calendar without creating a row.
+  for (const p of projects) {
+    for (const [imp, raw] of Object.entries(p.improvementTimes ?? {})) {
+      const startIso = impStartIso(raw);
+      if (!startIso) continue;
+      const start = new Date(startIso);
+      if (isNaN(start.getTime())) continue;
+      // An explicit end if set; otherwise default to one hour after the start
+      // (matches project "Add time" events).
+      const endIso = impEndIso(raw);
+      const end = endIso && !isNaN(new Date(endIso).getTime())
+        ? new Date(endIso)
+        : new Date(start.getTime() + 3600000);
+      const id = `${p.id}:${imp}`;
+      const base = { kind: "improvement" as const, id, projectTitle: p.title, title: imp, start, end };
+      // Multi-day improvement → separate start and end chips; same-day → one.
+      if (dkey(start) !== dkey(end)) {
+        if (start >= gridStart && start <= rangeEnd) push(start, { ...base, edge: "start" });
+        if (end >= gridStart && end <= rangeEnd) push(end, { ...base, edge: "end" });
+      } else if (start >= gridStart && start <= rangeEnd) {
+        push(start, { ...base, edge: "single" });
+      }
+    }
+  }
   const itemTime = (it: DayItem) =>
-    it.kind === "event" ? it.start.getTime() : it.kind === "task" ? it.due.getTime() : it.date.getTime();
+    it.kind === "event"
+      ? it.start.getTime()
+      : it.kind === "task"
+      ? it.due.getTime()
+      : it.kind === "improvement"
+      ? it.start.getTime()
+      : it.kind === "subtask"
+      ? it.due.getTime()
+      : it.date.getTime();
   for (const list of byDay.values()) list.sort((a, b) => itemTime(a) - itemTime(b));
 
   const dayItems = (byDay.get(dkey(selected)) ?? []).slice();
@@ -672,17 +829,34 @@ function CalendarPanel({
               <span className="cal-daynum">{day.getDate()}</span>
               <div className="cal-chips">
                 {items.slice(0, 3).map((it, i) => {
-                  const isProject = it.kind === "event" && it.project;
-                  const done = (it.kind === "event" || it.kind === "task") && it.done;
-                  const icon = isProject ? "🗂 " : it.kind === "note" ? "📝 " : "";
+                  const isProject =
+                    (it.kind === "event" && it.project) || it.kind === "improvement";
+                  const done =
+                    (it.kind === "event" || it.kind === "task" || it.kind === "subtask") && it.done;
+                  const edge =
+                    (it.kind === "event" || it.kind === "improvement") && it.edge && it.edge !== "single"
+                      ? it.edge
+                      : null;
+                  const icon = isProject
+                    ? "🗂 "
+                    : it.kind === "note"
+                    ? "📝 "
+                    : "";
+                  // Project items say "project"; improvements (project subtasks)
+                  // say "improvement"; multi-day ones tag start/end.
+                  const label = isProject
+                    ? `${it.kind === "improvement" ? "improvement" : "project"}: ${it.title}${
+                        edge ? ` (${edge})` : ""
+                      }`
+                    : it.title;
                   return (
                     <span
                       key={i}
                       className={`cal-chip ${isProject ? "project" : it.kind}${done ? " done" : ""}`}
-                      title={it.title}
+                      title={label}
                     >
                       {icon}
-                      {it.title}
+                      {label}
                     </span>
                   );
                 })}
@@ -705,16 +879,31 @@ function CalendarPanel({
 
         <ul className="cal-day-list">
           {dayItems.map((it) =>
-            it.kind === "event" && editId === it.id ? (
-              <li key={it.id} className="cal-day-edit">
-                <input value={eTitle} onChange={(e) => setETitle(e.target.value)} />
-                <DateField value={eStart} onChange={setEStart} />
-                <DateField value={eEnd} onChange={setEEnd} />
+            editId === it.id &&
+            (it.kind === "event" || it.kind === "improvement" || it.kind === "subtask") ? (
+              <li key={`edit-${it.id}`} className="cal-day-edit">
+                {editKind === "improvement" ? (
+                  <div className="cal-day-time">{eTitle}</div>
+                ) : (
+                  <input
+                    value={eTitle}
+                    onChange={(e) => setETitle(e.target.value)}
+                    placeholder="Title"
+                  />
+                )}
+                <DateField
+                  value={eStart}
+                  onChange={setEStart}
+                  placeholder={editKind === "subtask" ? "Due" : "Starts"}
+                />
+                {editKind !== "subtask" && (
+                  <DateField value={eEnd} onChange={setEEnd} placeholder="Ends" />
+                )}
                 <div className="cal-day-actions">
                   <button className="a-btn" onClick={saveEdit}>
                     Save
                   </button>
-                  <button className="ghost-btn" onClick={() => setEditId(null)}>
+                  <button className="ghost-btn" onClick={cancelEdit}>
                     Cancel
                   </button>
                 </div>
@@ -731,6 +920,73 @@ function CalendarPanel({
                   <div className="cal-day-time">note</div>
                 </div>
               </li>
+            ) : it.kind === "improvement" ? (
+              <li key={`imp-${it.id}-${it.edge}`} className="cal-day-item">
+                <span className="cal-dot improvement" />
+                <div className="cal-day-main">
+                  <div className="cal-day-title">
+                    <span className="cal-kind-icon" title="Project improvement">⚙</span>
+                    <span className="cal-day-tag">improvement</span>
+                    <span>{it.title}</span>
+                    {it.edge !== "single" && (
+                      <span className="cal-repeat">{it.edge === "start" ? "▶ starts" : "■ ends"}</span>
+                    )}
+                  </div>
+                  <div className="cal-day-time">
+                    {it.projectTitle} ·{" "}
+                    {it.edge === "end"
+                      ? `ends ${dateTimeStr(it.end)}`
+                      : it.edge === "start"
+                      ? `starts ${dateTimeStr(it.start)}`
+                      : `${timeStr(it.start)} → ${timeStr(it.end)}`}
+                  </div>
+                </div>
+                <button
+                  className="icon-edit"
+                  title="Edit time"
+                  onClick={() => openEditImprovement(it.id, it.title, it.start, it.end)}
+                >
+                  ✎
+                </button>
+                <button
+                  className="icon-x"
+                  title="Remove from calendar"
+                  onClick={() => patchImprovementTime(it.id, null)}
+                >
+                  ✕
+                </button>
+              </li>
+            ) : it.kind === "subtask" ? (
+              <li key={`sub-${it.id}`} className={`cal-day-item${it.done ? " is-done" : ""}`}>
+                <span className="cal-dot subtask" />
+                <div className="cal-day-main">
+                  <div className="cal-day-title">
+                    <span className="cal-kind-icon" title="Subtask">☑</span>
+                    <span className="cal-day-tag">subtask</span>
+                    <span>{it.title}</span>
+                  </div>
+                  <div className="cal-day-time">
+                    {it.parentTitle ? `${it.parentTitle} · ` : ""}due {dateTimeStr(it.due)}
+                  </div>
+                </div>
+                <button
+                  className="icon-ok"
+                  title="Mark done"
+                  onClick={() => patchSubtask(it.id, { done: true })}
+                >
+                  ✓
+                </button>
+                <button
+                  className="icon-edit"
+                  title="Edit"
+                  onClick={() => openEditSubtask(it.id, it.title, it.due)}
+                >
+                  ✎
+                </button>
+                <button className="icon-x" title="Delete" onClick={() => delSubtask(it.id)}>
+                  ✕
+                </button>
+              </li>
             ) : (
               <li key={`${it.kind}-${it.id}`} className={`cal-day-item${it.done ? " is-done" : ""}`}>
                 <span
@@ -740,18 +996,33 @@ function CalendarPanel({
                 />
                 <div className="cal-day-main">
                   <div className="cal-day-title">
-                    <RefChip id={refOf(it.kind, it.seq)} />
+                    {/* Visual only: project times read "Project N" here, while the
+                        voice agent still references them as "Event N" (see lib/agent.ts). */}
+                    <RefChip
+                      id={
+                        it.kind === "event" && it.project
+                          ? `Project ${it.seq}`
+                          : refOf(it.kind, it.seq)
+                      }
+                    />
                     {it.kind === "event" && it.project && (
                       <span className="cal-kind-icon" title="Project event">🗂</span>
                     )}
                     <span>{it.title}</span>
+                    {it.kind === "event" && it.edge && (
+                      <span className="cal-repeat">{it.edge === "start" ? "▶ starts" : "■ ends"}</span>
+                    )}
                     {it.kind === "event" && it.recurrence !== "none" && (
                       <span className="cal-repeat">↻ {repeatLabel[it.recurrence]}</span>
                     )}
                   </div>
                   <div className="cal-day-time">
                     {it.kind === "event"
-                      ? `${timeStr(it.start)} → ${timeStr(it.end)}`
+                      ? it.edge === "end"
+                        ? `ends ${dateTimeStr(it.end)}`
+                        : it.edge === "start"
+                        ? `starts ${dateTimeStr(it.start)}`
+                        : `${timeStr(it.start)} → ${timeStr(it.end)}`
                       : `due ${timeStr(it.due)}`}
                   </div>
                 </div>
@@ -1043,7 +1314,14 @@ function ProjectCard({
 
   const improvements = project.improvements ?? [];
   const impTimes = project.improvementTimes ?? {};
-  const impToInput = (imp: string) => (impTimes[imp] ? toLocalInput(new Date(impTimes[imp])) : "");
+  const impStartInput = (imp: string) => {
+    const s = impStartIso(impTimes[imp]);
+    return s ? toLocalInput(new Date(s)) : "";
+  };
+  const impEndInput = (imp: string) => {
+    const e = impEndIso(impTimes[imp]);
+    return e ? toLocalInput(new Date(e)) : "";
+  };
 
   const saveTitle = () => {
     setEditingTitle(false);
@@ -1062,7 +1340,7 @@ function ProjectCard({
     const oldText = next[idx];
     const newText = impDraft.trim();
     next[idx] = newText;
-    const body: { improvements: string[]; improvementTimes?: Record<string, string> } = {
+    const body: { improvements: string[]; improvementTimes?: Record<string, ImpTime> } = {
       improvements: next,
     };
     // Keep the scheduled time attached when the text is renamed.
@@ -1080,10 +1358,24 @@ function ProjectCard({
     delete t[removed];
     onPatch({ improvements: improvements.filter((_, i) => i !== idx), improvementTimes: t });
   };
-  const setImpTime = (imp: string, iso: string | null) => {
+  // Set the start of an improvement's scheduled time. Clearing the start removes
+  // the whole schedule (an end with no start makes no sense).
+  const setImpStart = (imp: string, iso: string | null) => {
     const t = { ...impTimes };
-    if (iso) t[imp] = iso;
-    else delete t[imp];
+    if (iso) {
+      const prevEnd = impEndIso(t[imp]);
+      t[imp] = prevEnd ? { start: iso, end: prevEnd } : { start: iso };
+    } else {
+      delete t[imp];
+    }
+    onPatch({ improvementTimes: t });
+  };
+  // Set/clear the end of an improvement's scheduled time (no-op without a start).
+  const setImpEnd = (imp: string, iso: string | null) => {
+    const start = impStartIso(impTimes[imp]);
+    if (!start) return;
+    const t = { ...impTimes };
+    t[imp] = iso ? { start, end: iso } : { start };
     onPatch({ improvementTimes: t });
   };
   const addTime = () => {
@@ -1204,12 +1496,22 @@ function ProjectCard({
                 ✕
               </button>
             </div>
-            <DateField
-              value={impToInput(imp)}
-              onChange={(v) => setImpTime(imp, v ? new Date(v).toISOString() : null)}
-              placeholder="Add time"
-              className="proj-imp-date"
-            />
+            <div className="proj-imp-dates">
+              <DateField
+                value={impStartInput(imp)}
+                onChange={(v) => setImpStart(imp, v ? new Date(v).toISOString() : null)}
+                placeholder="Start"
+                className="proj-imp-date"
+              />
+              {impStartInput(imp) && (
+                <DateField
+                  value={impEndInput(imp)}
+                  onChange={(v) => setImpEnd(imp, v ? new Date(v).toISOString() : null)}
+                  placeholder="End"
+                  className="proj-imp-date"
+                />
+              )}
+            </div>
           </li>
         ))}
         {improvements.length === 0 && (

@@ -11,7 +11,8 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { LocalStatus } from "@/lib/local-presence";
 import { openrouterStatus, type ProviderKey, type ProviderModel } from "@/lib/bridge";
-import { runPhase, type PipelineEvent, type Phase } from "@/lib/pipeline-agent";
+import { runPhase, orderChainForDifficulty, type PipelineEvent, type Phase, type Difficulty } from "@/lib/pipeline-agent";
+import { loadPipelineConfig, savePipelineConfig, PIPELINE_LIMITS, type PipelineConfig } from "@/lib/pipeline-config";
 import { publishModel, setIdle, logRoute } from "@/lib/model-hud";
 import { byBestModel } from "@/lib/model-rank";
 import { notify, confirmDialog } from "@/lib/toast";
@@ -37,10 +38,6 @@ type Teams = {
   reviewEnabled: boolean;
   autoFixEnabled?: boolean; // when Review finds critical issues, auto plan→exec→review again
 };
-
-// How many times the pipeline may auto-replan/re-execute when Review keeps
-// reporting critical issues, before it stops and hands back to the user.
-const MAX_AUTO_FIX_ROUNDS = 3;
 
 // Did the Review team's verdict report critical/blocking issues? Prefer the
 // explicit VERDICT line the prompt asks for; fall back to keyword heuristics
@@ -83,6 +80,17 @@ export default function Pipeline({ status }: { status: LocalStatus }) {
   // ── team config ──
   const [teams, setTeams] = useState<Teams>({ planning: [], execution: [], review: [], reviewEnabled: true, autoFixEnabled: true });
   const seededRef = useRef(false);
+
+  // ── tunable run knobs (autonomy, retries, token caps, smart routing) ──
+  // Kept in a ref too so the long-lived async run loops read the LATEST value
+  // (state closures inside a running pipeline would otherwise go stale).
+  const [cfg, setCfgState] = useState<PipelineConfig>(() => loadPipelineConfig());
+  const cfgRef = useRef(cfg);
+  function setCfg(next: Partial<PipelineConfig>) {
+    const merged = savePipelineConfig({ ...cfgRef.current, ...next });
+    cfgRef.current = merged;
+    setCfgState(merged);
+  }
 
   // ── which model the running phase is actually using (live) ──
   const [activeModel, setActiveModel] = useState<string>("");
@@ -233,15 +241,6 @@ export default function Pipeline({ status }: { status: LocalStatus }) {
     setEvents((prev) => [...prev.slice(-400), e]);
   };
 
-  // How many extra times to auto-continue a phase that hits the 30-step cap.
-  // Hitting the cap means the model was still making PROGRESS (the loop already
-  // bails out on its own when a model errors or gets stuck repeating), so a long
-  // task should keep going rather than be abandoned half-done. Each continue
-  // re-preps the phase and reads the memory tail, so context carries over — it's
-  // a fresh step budget, not a restart. High ceiling = effectively "keep going
-  // until done"; the user can still Stop at any time.
-  const PHASE_CAP_CONTINUES = 30;
-
   // Persist a checkpoint flag so a rerun can resume past a finished phase.
   async function setCheckpoint(id: string, patch: { planDone?: boolean; execDone?: boolean }) {
     try {
@@ -251,17 +250,24 @@ export default function Pipeline({ status }: { status: LocalStatus }) {
     } catch { /* best-effort */ }
   }
 
-  // Run a phase, auto-continuing if it hits the step cap (resilient to long tasks).
+  // Run a phase, auto-continuing if it hits the step cap (resilient to long
+  // tasks). Hitting the cap means the model was still making PROGRESS (the loop
+  // bails on its own when a model errors or gets stuck), so a long task keeps
+  // going. Each continue re-preps the phase and reads the memory tail, so
+  // context carries over — a fresh step budget, not a restart. The user can Stop
+  // at any time. The cap-continue ceiling is the `capContinues` knob.
   async function runPhaseResilient(
     projectId: string, phase: Phase, models: string[],
     opts: { signal: AbortSignal; runningPhase: string }
   ) {
-    let res = await runPhase(projectId, phase, models, { onProgress, ...opts });
+    const max = cfgRef.current.capContinues;
+    const runOpts = { onProgress, cfg: cfgRef.current, ...opts };
+    let res = await runPhase(projectId, phase, models, runOpts);
     let cont = 0;
-    while (res.status === "capped" && cont < PHASE_CAP_CONTINUES && !opts.signal.aborted) {
+    while (res.status === "capped" && cont < max && !opts.signal.aborted) {
       cont++;
-      onProgress({ phase: "info", summary: `Step limit hit — auto-continuing (${cont}/${PHASE_CAP_CONTINUES})…` });
-      res = await runPhase(projectId, phase, models, { onProgress, ...opts });
+      onProgress({ phase: "info", summary: `Step limit hit — auto-continuing (${cont}/${max})…` });
+      res = await runPhase(projectId, phase, models, runOpts);
     }
     return res;
   }
@@ -285,6 +291,27 @@ export default function Pipeline({ status }: { status: LocalStatus }) {
     return false;
   }
 
+  // Smart execution routing: rate the task once (cheap rotated call) and reorder
+  // the Execution chain so it STARTS at the matching model tier (easy → weaker
+  // models, hard → strongest) while still escalating upward on failure. When
+  // smart routing is off, the chain is used as configured (best-first).
+  async function execChainFor(p: Project): Promise<string[]> {
+    const chain = chainFor("execution");
+    if (!cfgRef.current.smartRouting || chain.length <= 1) return chain;
+    try {
+      const res = await fetch("/api/pipeline/classify", {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id: p.id }),
+      });
+      const data = await res.json().catch(() => ({}));
+      const difficulty = (["easy", "medium", "hard"].includes(data?.difficulty) ? data.difficulty : "hard") as Difficulty;
+      const ordered = orderChainForDifficulty(chain, difficulty);
+      onProgress({ phase: "info", team: "Execution", model: ordered[0], summary: `Task rated ${difficulty} — starting execution at ${ordered[0]}.` });
+      return ordered;
+    } catch {
+      return chain; // classifier unreachable → use the configured order
+    }
+  }
+
   // Run Planning → Execution for one iteration (honouring resume checkpoints).
   // Returns true only when BOTH phases genuinely finished (proceed to review).
   async function runPlanExec(p: Project, ctrl: AbortController, resume = false): Promise<boolean> {
@@ -298,7 +325,9 @@ export default function Pipeline({ status }: { status: LocalStatus }) {
     }
 
     if (!(resume && p.execDone)) {
-      const exec = await runPhaseResilient(p.id, "executing", chainFor("execution"), { ...common, runningPhase: "executing" });
+      const execChain = await execChainFor(p);
+      if (ctrl.signal.aborted) return false;
+      const exec = await runPhaseResilient(p.id, "executing", execChain, { ...common, runningPhase: "executing" });
       if (!(await handlePhaseOutcome(p.id, "executing", exec, ctrl.signal.aborted))) return false;
       await setCheckpoint(p.id, { execDone: true });
     } else {
@@ -323,9 +352,10 @@ export default function Pipeline({ status }: { status: LocalStatus }) {
     return null;
   }
 
-  // Run a project: Planning → Execution, then (if review enabled) STOP and prompt.
-  // When `resume` is set, skip phases already checkpointed for this iteration so a
-  // rerun picks up where it stopped instead of redoing planning.
+  // Run a project: Planning → Execution, then Review & Test. In AUTONOMOUS mode
+  // (the default) Review + auto-fix run end-to-end with no manual gate; otherwise
+  // it STOPS after execution and prompts. When `resume` is set, skip phases
+  // already checkpointed for this iteration so a rerun picks up where it stopped.
   async function runProject(p: Project, resume = false) {
     if (running) return;
     setActiveId(p.id);
@@ -338,13 +368,17 @@ export default function Pipeline({ status }: { status: LocalStatus }) {
     try {
       if (!(await runPlanExec(p, ctrl, resume))) return;
 
-      if (teams.reviewEnabled) {
+      if (!teams.reviewEnabled) {
+        await setProjPhase(p.id, "done");
+        onProgress({ phase: "done", summary: "Pipeline complete (review skipped)." });
+      } else if (cfgRef.current.autonomous) {
+        // Fully autonomous: go straight into Review & Test + auto-fix.
+        onProgress({ phase: "info", summary: "Execution finished — running Review & Test autonomously…" });
+        await reviewLoop(p, ctrl);
+      } else {
         await setProjPhase(p.id, "awaiting_review");
         setAwaitingReview(p.id);
         onProgress({ phase: "info", summary: "Execution finished. Run Review & Test? (decide below)" });
-      } else {
-        await setProjPhase(p.id, "done");
-        onProgress({ phase: "done", summary: "Pipeline complete (review skipped)." });
       }
     } finally {
       setRunning(false);
@@ -353,9 +387,52 @@ export default function Pipeline({ status }: { status: LocalStatus }) {
     }
   }
 
-  // Run Review & Test, then — if it reports critical issues and auto-fix is on —
-  // automatically plan & execute a fix and review again, looping until it PASSES
-  // or the auto-fix round cap is hit (then it hands back to the user).
+  // The Review & Test loop: review, and if it reports critical issues and
+  // auto-fix is on, auto plan→execute a fix and review again until it PASSES or
+  // the auto-fix round cap is hit (then hand back). Assumes the caller owns the
+  // running/abort lifecycle (runReview sets it up; runProject reuses its own).
+  async function reviewLoop(p: Project, ctrl: AbortController) {
+    // How many auto-replan/re-execute rounds before handing back to the user.
+    const MAX_AUTO_FIX_ROUNDS = cfgRef.current.autoFixRounds;
+    // Default ON: a config that predates this flag (undefined) must NOT silently
+    // disable auto-fix — that's the bug where Review reported ISSUES and nothing redid.
+    const autoFix = teams.autoFixEnabled ?? true;
+    let current = p;
+    for (let autoRound = 0; autoRound <= MAX_AUTO_FIX_ROUNDS; autoRound++) {
+      const rev = await runPhaseResilient(current.id, "reviewing", chainFor("review"), { signal: ctrl.signal, runningPhase: "reviewing" });
+
+      if (ctrl.signal.aborted || rev.status === "stopped" || rev.status === "capped") {
+        // Not lost — back to the gate so it can be re-run.
+        await setProjPhase(current.id, "awaiting_review");
+        setAwaitingReview(current.id);
+        return;
+      }
+      if (rev.status === "error") { await setProjPhase(current.id, "error"); return; }
+
+      // status === "done": inspect the verdict.
+      if (!autoFix || !reviewFoundIssues(rev.summary)) {
+        await setProjPhase(current.id, "done");
+        if (autoFix) onProgress({ phase: "done", summary: "Review passed — pipeline complete." });
+        else if (reviewFoundIssues(rev.summary)) onProgress({ phase: "info", summary: "Review found issues — auto-fix is off. Use ↻ Fix issues below to re-plan & re-execute." });
+        return;
+      }
+
+      if (autoRound >= MAX_AUTO_FIX_ROUNDS) {
+        await setProjPhase(current.id, "awaiting_review");
+        setAwaitingReview(current.id);
+        onProgress({ phase: "info", summary: `Review still found issues after ${MAX_AUTO_FIX_ROUNDS} auto-fix round(s) — stopping for you. Add a follow-up prompt or re-run review.` });
+        return;
+      }
+
+      onProgress({ phase: "review", summary: `Review found critical issues — auto planning & executing a fix (round ${autoRound + 1}/${MAX_AUTO_FIX_ROUNDS})…` });
+      const next = await startFixIteration(current);
+      if (!next) { await setProjPhase(current.id, "error"); onProgress({ phase: "error", summary: "Couldn't start the auto-fix iteration." }); return; }
+      if (!(await runPlanExec(next, ctrl))) return; // a phase stopped/capped/errored; outcome already set
+      current = next; // loop back and review the fixed iteration
+    }
+  }
+
+  // Manual entry point for Review & Test (the gate button): owns the run lifecycle.
   async function runReview(p: Project) {
     if (running) return;
     setActiveId(p.id);
@@ -363,43 +440,8 @@ export default function Pipeline({ status }: { status: LocalStatus }) {
     setRunning(true);
     const ctrl = new AbortController();
     abortRef.current = ctrl;
-    // Default ON: a config that predates this flag (undefined) must NOT silently
-    // disable auto-fix — that's the bug where Review reported ISSUES and nothing redid.
-    const autoFix = teams.autoFixEnabled ?? true;
     try {
-      let current = p;
-      for (let autoRound = 0; autoRound <= MAX_AUTO_FIX_ROUNDS; autoRound++) {
-        const rev = await runPhaseResilient(current.id, "reviewing", chainFor("review"), { signal: ctrl.signal, runningPhase: "reviewing" });
-
-        if (ctrl.signal.aborted || rev.status === "stopped" || rev.status === "capped") {
-          // Not lost — back to the gate so it can be re-run.
-          await setProjPhase(current.id, "awaiting_review");
-          setAwaitingReview(current.id);
-          return;
-        }
-        if (rev.status === "error") { await setProjPhase(current.id, "error"); return; }
-
-        // status === "done": inspect the verdict.
-        if (!autoFix || !reviewFoundIssues(rev.summary)) {
-          await setProjPhase(current.id, "done");
-          if (autoFix) onProgress({ phase: "done", summary: "Review passed — pipeline complete." });
-          else if (reviewFoundIssues(rev.summary)) onProgress({ phase: "info", summary: "Review found issues — auto-fix is off. Use ↻ Fix issues below to re-plan & re-execute." });
-          return;
-        }
-
-        if (autoRound >= MAX_AUTO_FIX_ROUNDS) {
-          await setProjPhase(current.id, "awaiting_review");
-          setAwaitingReview(current.id);
-          onProgress({ phase: "info", summary: `Review still found issues after ${MAX_AUTO_FIX_ROUNDS} auto-fix round(s) — stopping for you. Add a follow-up prompt or re-run review.` });
-          return;
-        }
-
-        onProgress({ phase: "review", summary: `Review found critical issues — auto planning & executing a fix (round ${autoRound + 1}/${MAX_AUTO_FIX_ROUNDS})…` });
-        const next = await startFixIteration(current);
-        if (!next) { await setProjPhase(current.id, "error"); onProgress({ phase: "error", summary: "Couldn't start the auto-fix iteration." }); return; }
-        if (!(await runPlanExec(next, ctrl))) return; // a phase stopped/capped/errored; outcome already set
-        current = next; // loop back and review the fixed iteration
-      }
+      await reviewLoop(p, ctrl);
     } finally {
       setRunning(false);
       abortRef.current = null;
@@ -504,8 +546,63 @@ export default function Pipeline({ status }: { status: LocalStatus }) {
     );
   }
 
+  // Friendly labels + hints for the numeric knobs (order = display order).
+  const KNOBS: { key: keyof typeof PIPELINE_LIMITS; label: string; hint: string; fmt?: (n: number) => string }[] = [
+    { key: "maxRoundsPerPhase", label: "Max steps / phase", hint: "Tool steps before a phase pauses (resumable)." },
+    { key: "capContinues", label: "Auto-continues", hint: "Times a paused (step-capped) phase auto-continues." },
+    { key: "autoFixRounds", label: "Auto-fix rounds", hint: "Re-plan/re-execute rounds when Review reports issues." },
+    { key: "modelRetries", label: "Model retries", hint: "Same-model retries on a transient blip before escalating." },
+    { key: "repeatNudgeAt", label: "Repeat nudge at", hint: "Identical calls before nudging the model to move on." },
+    { key: "repeatAbortAt", label: "Repeat abort at", hint: "Identical calls before escalating to the next model." },
+    { key: "toolResultCap", label: "Tool result cap", hint: "Max chars kept per tool result (lower = fewer tokens).", fmt: (n) => `${n} ch` },
+    { key: "keepFullRounds", label: "Keep full rounds", hint: "Recent rounds kept verbatim before older results are stubbed." },
+    { key: "temperature", label: "Temperature", hint: "Sampling randomness for the model calls.", fmt: (n) => n.toFixed(2) },
+  ];
+
   return (
     <div>
+      {/* Run knobs — autonomy, reliability + token economy. Collapsed by default. */}
+      <details className="collapse">
+        <summary>
+          Pipeline settings (autonomy &amp; limits)
+          <span className="col-caret" />
+        </summary>
+        <div className="collapse-body">
+          <div style={{ display: "flex", gap: 16, flexWrap: "wrap", marginBottom: 12 }}>
+            <label style={{ fontSize: 13, display: "flex", alignItems: "center", gap: 6 }}
+              title="After execution, run Review & Test (+ auto-fix) end-to-end with no manual gate.">
+              <input type="checkbox" checked={cfg.autonomous} onChange={(e) => setCfg({ autonomous: e.target.checked })} />
+              Fully autonomous (no review gate)
+            </label>
+            <label style={{ fontSize: 13, display: "flex", alignItems: "center", gap: 6 }}
+              title="Rate the task easy/medium/hard and start execution at the matching model tier (easy → weaker, hard → strongest).">
+              <input type="checkbox" checked={cfg.smartRouting} onChange={(e) => setCfg({ smartRouting: e.target.checked })} />
+              Smart model routing (difficulty-based)
+            </label>
+          </div>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 12 }}>
+            {KNOBS.map(({ key, label, hint, fmt }) => {
+              const lim = PIPELINE_LIMITS[key];
+              const val = cfg[key];
+              return (
+                <label key={key} style={{ fontSize: 12.5 }} title={hint}>
+                  <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 2 }}>
+                    <span>{label}</span>
+                    <span className="mono" style={{ opacity: 0.8 }}>{fmt ? fmt(val) : val}</span>
+                  </div>
+                  <input type="range" min={lim.min} max={lim.max} step={lim.step} value={val}
+                    onChange={(e) => setCfg({ [key]: Number(e.target.value) } as Partial<PipelineConfig>)}
+                    style={{ width: "100%" }} />
+                </label>
+              );
+            })}
+          </div>
+          <p className="tab-sub" style={{ fontSize: 11.5, marginBottom: 0 }}>
+            Key-rotation depth (keys tried per model) is a router-wide setting — see Rotation settings on the LLM Keys tab.
+          </p>
+        </div>
+      </details>
+
       {/* Teams — collapsed by default so the long model chains stay tidy */}
       <details className="collapse">
         <summary>

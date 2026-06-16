@@ -92,6 +92,12 @@ export const LOCAL_TOOL_GROUPS: LocalToolGroup[] = [
     hint: "Send WhatsApp/Telegram/email and manage contacts.",
     tools: ["send_message", "add_contact", "list_contacts", "sync_contacts"],
   },
+  {
+    key: "github",
+    label: "GitHub & health",
+    hint: "List/review PRs, repo CI status, and run project health checks.",
+    tools: ["github_prs", "github_status", "github_pr_review", "health_status"],
+  },
 ];
 
 const DISABLED_KEY = "local.tools.disabled";

@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, gte, lte, ilike, or } from "drizzle-orm";
+import { and, asc, desc, eq, gte, lte, ilike, inArray, or } from "drizzle-orm";
 import { db, tasks, subtasks, events, notes, projects } from "@/db";
 import { expandEvents } from "./recur";
 import { parseRef, refOf } from "./refs";
@@ -12,6 +12,8 @@ import { sendMessage, type Channel } from "@/lib/messaging";
 import { listContacts, upsertContact, deleteContact } from "@/lib/contacts";
 import { importGoogleContacts, createGoogleContact } from "@/lib/google-contacts";
 import { isTelegramUserConfigured, importTelegramContacts } from "@/lib/telegram-user";
+import { listAllOpenPrs, getRepoStatus, summarizePr, listConfiguredRepos } from "@/lib/github";
+import { runAll as runHealthChecks, getSelfHealth } from "@/lib/health";
 
 // JSON-schema tool definitions handed to the Groq LLM.
 export const toolDefs = [
@@ -512,7 +514,7 @@ export const toolDefs = [
     function: {
       name: "fetch_emails_now",
       description:
-        "Poll Gmail now for NEW emails and summarize them. For 'fetch/check my email now', 'any new emails'. Returns only mail since the last fetch; if new_emails is 0, say plainly 'No new emails.' For a DIGEST/SUMMARY ('what's my digest', 'today's emails'), call this AND list_emails(today_only=true) together in the same turn — fetch first, then read the result.",
+        "Poll Gmail now for NEW emails and summarize them. For 'fetch/check my email now', 'any new emails'. Returns only mail since the last fetch in `emails` (sender, subject, summary, urgency). ALWAYS read the fetched emails back to the user: if new_emails is 0, say plainly 'No new emails.'; otherwise state the count THEN list each new email — its sender and subject with a one-line summary (most urgent first) — do NOT just say how many there are. For a DIGEST/SUMMARY ('what's my digest', 'today's emails'), call this AND list_emails(today_only=true) together in the same turn — fetch first, then read the result.",
       parameters: { type: "object", properties: {} },
     },
   },
@@ -551,7 +553,7 @@ export const toolDefs = [
     function: {
       name: "browser_open",
       description:
-        "Open / navigate the user's controlled browser to one website and return the initial snapshot refs in the same result. Use when the user wants to do something ON a site that needs their login (dashboards, account pages). `url` is a full https URL or a known site name. After browser_open, use the returned `[ref]` lines directly for browser_act; do not call browser_snapshot just to get the first refs. After one browser_open attempt in a turn, do not call browser_open again unless the user explicitly asked for a different website; use browser_act, browser_read, or browser_snapshot on the current page.",
+        "Open / navigate the user's controlled browser to one website and return the initial snapshot refs in the same result. Use when the user wants to do something ON a site that needs their login (dashboards, account pages). `url` is a full https URL or a known site name. The snapshot in this result is ONLY a ref map for finding interaction targets — it is NOT the page's readable text. Do NOT describe, summarize, or tell the user what the page says based on this result; if they asked what the page says/contains, call browser_read. After browser_open, use the returned `[ref]` lines directly for browser_act; do not call browser_snapshot just to get the first refs. After one browser_open attempt in a turn, do not call browser_open again unless the user explicitly asked for a different website; use browser_act, browser_read, or browser_snapshot on the current page.",
       parameters: {
         type: "object",
         properties: {
@@ -566,7 +568,7 @@ export const toolDefs = [
     function: {
       name: "browser_snapshot",
       description:
-        "Look at the page currently open in the controlled browser so you can find clickable/typeable targets. It returns a compact ref map like `[ref] role \"name\"`, plus href/viewport/clickable-parent/frame hints and any detected login requirement. It is NOT the page reader and may omit long prose, search-result snippets, course descriptions, table text, and article content. Use browser_read when the user asks what the page says, what you found, or when you need readable page text. Do not call browser_snapshot immediately after browser_open because browser_open already returns the initial snapshot. Snapshot after clicks/filter changes when you need updated refs, or when an action reports its target is missing. If snapshot returns count 0 or says no clickable elements were found, use browser_read to inspect readable text, or browser_scroll to reveal more refs and return a fresh snapshot. If it reports the browser is closed, tell the user to open a site first; if it reports a login is needed, warn them — you CANNOT do Google/SSO/'continue with…' logins or submit passwords yourself.",
+        "Get the interaction elements of the page currently open in the controlled browser so you can find clickable/typeable targets. It returns a compact ref map like `[ref] role \"name\"`, plus href/viewport/clickable-parent/frame hints and any detected login requirement. This is purely an element/ref map for interaction — it is NOT the page reader and may omit long prose, search-result snippets, course descriptions, table text, and article content. Never describe or summarize page content from a snapshot result; for that you MUST use browser_read. Use browser_read when the user asks what the page says, what you found, or when you need readable page text. Do not call browser_snapshot immediately after browser_open because browser_open already returns the initial snapshot. Snapshot after clicks/filter changes when you need updated refs, or when an action reports its target is missing. If snapshot returns count 0 or says no clickable elements were found, use browser_read to inspect readable text, or browser_scroll to reveal more refs and return a fresh snapshot. If it reports the browser is closed, tell the user to open a site first; if it reports a login is needed, warn them — you CANNOT do Google/SSO/'continue with…' logins or submit passwords yourself.",
       parameters: { type: "object", properties: {} },
     },
   },
@@ -597,7 +599,7 @@ export const toolDefs = [
     function: {
       name: "browser_act",
       description:
-        "Perform ONE action on the controlled browser's current page. For click/type/select/check, `ref` is required and must be the numeric `[ref]` from the latest browser_open, browser_snapshot, browser_scroll, or browser_act snapshot result; do not pass labels, CSS selectors, or words like 'courses' as ref. For back/enter, omit ref. Every successful action returns a fresh snapshot; use that returned snapshot to decide the next click. Do not use browser_read just to verify a click/filter if the snapshot already shows enough state. Use browser_read after navigating/filtering when the user asked what the page says, what courses/results you found, or when you need final readable prose/table/search-result text. If a click/type/select/check target is missing, call browser_scroll to reveal more refs, then retry with a ref from the fresh snapshot. Never try to log in via Google/SSO or submit a password — tell the user to do that themselves.",
+        "Perform ONE action on the controlled browser's current page. For click/type/select/check, `ref` is required and must be the numeric `[ref]` from the latest browser_open, browser_snapshot, browser_scroll, or browser_act snapshot result; do not pass labels, CSS selectors, or words like 'courses' as ref. For back/enter, omit ref. Every successful action returns a fresh snapshot — this snapshot is ONLY a ref map to decide the next action, NOT readable page content. Do not describe or summarize what the page says from a browser_act result; use browser_read for that. Do not use browser_read just to verify a click/filter if the snapshot already shows enough state. Use browser_read after navigating/filtering when the user asked what the page says, what courses/results you found, or when you need final readable prose/table/search-result text. If a click/type/select/check target is missing, call browser_scroll to reveal more refs, then retry with a ref from the fresh snapshot. Never try to log in via Google/SSO or submit a password — tell the user to do that themselves.",
       parameters: {
         type: "object",
         properties: {
@@ -618,7 +620,7 @@ export const toolDefs = [
     function: {
       name: "browser_read",
       description:
-        "Read the human-readable text from the page currently open in the controlled browser. It takes NO ref and does not click anything. Use it to answer or summarize what is on the current page after opening, searching, clicking, filtering, or scrolling: articles, search-result snippets, course/result lists, table text, instructions, and page prose. browser_snapshot is only a ref map for interaction targets and can omit this readable content. Do not use browser_read just to verify a click/filter when browser_act's returned snapshot already shows enough state; use it when you need the actual words/results to tell the user what you found. Returns page text, or a closed-browser/login notice.",
+        "THIS IS THE ONLY READING TOOL. Read the human-readable text from the page currently open in the controlled browser. It takes NO ref and does not click anything. browser_open/browser_act/browser_snapshot/browser_scroll results are ref maps, not page content — whenever you need to tell the user what a page actually says or contains, call browser_read instead of reading off those snapshots. Use it to answer or summarize what is on the current page after opening, searching, clicking, filtering, or scrolling: articles, search-result snippets, course/result lists, table text, instructions, and page prose. browser_snapshot is only a ref map for interaction targets and can omit this readable content. Do not use browser_read just to verify a click/filter when browser_act's returned snapshot already shows enough state; use it when you need the actual words/results to tell the user what you found. Returns page text, or a closed-browser/login notice.",
       parameters: { type: "object", properties: {} },
     },
   },
@@ -820,6 +822,61 @@ export const toolDefs = [
       },
     },
   },
+  {
+    type: "function" as const,
+    function: {
+      name: "github_prs",
+      description:
+        "List open GitHub pull requests across the user's configured repos, with CI status. Use for 'any open PRs?', 'what pull requests are open', 'PR status'. Optionally filter to one repo.",
+      parameters: {
+        type: "object",
+        properties: {
+          repo: { type: ["string", "null"], description: "Optional 'owner/repo' to limit to one repository." },
+        },
+      },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
+      name: "github_status",
+      description:
+        "Get the CI / build status of a GitHub repository (its default branch's latest commit) plus its open-PR count. Use for 'is the build passing', 'CI status of owner/repo'.",
+      parameters: {
+        type: "object",
+        properties: {
+          repo: { type: "string", description: "'owner/repo' (required)." },
+        },
+        required: ["repo"],
+      },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
+      name: "github_pr_review",
+      description:
+        "Summarize or review a specific GitHub pull request using the rotating models. Use for 'summarize PR 42 in owner/repo', 'review pull request 7'. mode 'review' gives a code review; 'summary' gives a plain summary.",
+      parameters: {
+        type: "object",
+        properties: {
+          repo: { type: "string", description: "'owner/repo' (required)." },
+          number: { type: "number", description: "the PR number (required)." },
+          mode: { type: ["string", "null"], enum: ["summary", "review", null], description: "'summary' (default) or 'review'." },
+        },
+        required: ["repo", "number"],
+      },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
+      name: "health_status",
+      description:
+        "Run the project health checks and report which sites/endpoints are up or down (with latency), plus this app's own self-health (database + config). Use for 'is my site up', 'health status', 'is everything online'.",
+      parameters: { type: "object", properties: {} },
+    },
+  },
 ];
 
 // ── Coding-mode file tools (LOCAL ONLY) ─────────────────────────────────────
@@ -930,11 +987,11 @@ const CORE_TOOLS = new Set([
 // RULE block (not just the tools) only when relevant — keeping every request's
 // prompt small. The core task/event/note rules are always present (and form a
 // stable, cacheable prefix); only these domain blocks vary.
-export type GroupKey = "email" | "spotify" | "local" | "shell" | "search" | "message";
+export type GroupKey = "email" | "spotify" | "local" | "shell" | "search" | "message" | "github";
 
 // Every domain group. Used by the LOCAL "all tools" path: a local model has no
 // token budget to protect, so it gets the entire toolset + all rule blocks.
-export const ALL_GROUPS: GroupKey[] = ["email", "spotify", "local", "shell", "search", "message"];
+export const ALL_GROUPS: GroupKey[] = ["email", "spotify", "local", "shell", "search", "message", "github"];
 
 const TOOL_GROUPS: { key: GroupKey; tools: string[]; re: RegExp }[] = [
   {
@@ -975,6 +1032,12 @@ const TOOL_GROUPS: { key: GroupKey; tools: string[]; re: RegExp }[] = [
     // "text"/"tell"/"send" are intentionally here; mis-routes self-heal.
     tools: ["send_message", "add_contact", "list_contacts", "sync_contacts"],
     re: /\b(message|messages|whatsapp|telegram|dm|imessage|texting|contact|contacts|notify|sync|import)\b|\b(text|tell|send|msg|message|email|let)\b.{0,30}\b(mom|dad|him|her|them|to|that|know|saying)\b/i,
+  },
+  {
+    key: "github",
+    // PRs / repo CI status / PR review + project health/uptime checks.
+    tools: ["github_prs", "github_status", "github_pr_review", "health_status"],
+    re: /\b(github|pull request|pull requests|\bpr\b|\bprs\b|repo|repository|\bci\b|build status|merge|health|uptime|status check)\b|\bis\b.{0,20}\b(up|down|online|offline|healthy)\b/i,
   },
 ];
 
@@ -1195,12 +1258,15 @@ async function execTool(name: string, args: Args): Promise<unknown> {
     case "delete_task": {
       const id = await resolveTaskId(args);
       if (!id) return { error: "no matching task found" };
+      // Remove child subtasks first (FK cascade may be missing on older DBs).
+      await db.delete(subtasks).where(eq(subtasks.taskId, id));
       const [row] = await db
         .delete(tasks)
         .where(eq(tasks.id, id))
         .returning();
       return row ? { deleted: true } : { error: "task not found" };
     }
+
     case "complete_all": {
       const target = args.target ?? "all";
       const out: Args = {};
@@ -1304,6 +1370,9 @@ async function execTool(name: string, args: Args): Promise<unknown> {
       const out: Args = {};
       if (target === "tasks" || target === "all") {
         const rows = await db.delete(tasks).where(taskWhere).returning();
+        // Clear subtasks of the deleted tasks (FK cascade may be absent on older DBs).
+        const deletedIds = rows.map((r) => r.id);
+        if (deletedIds.length) await db.delete(subtasks).where(inArray(subtasks.taskId, deletedIds));
         out.deleted_tasks = rows.length;
       }
       if (target === "events" || target === "all") {
@@ -1502,7 +1571,11 @@ async function execTool(name: string, args: Args): Promise<unknown> {
       let improvements = [...(row.improvements ?? [])];
       // Times are keyed by improvement TEXT, so keep the map in sync as text
       // changes/removes happen.
-      const times: Record<string, string> = { ...(row.improvementTimes ?? {}) };
+      // Values are a bare ISO start (AI sets start only) or { start, end? } from
+      // the UI. The AI just carries values on rename and sets a start time.
+      const times: Record<string, string | { start: string; end?: string }> = {
+        ...(row.improvementTimes ?? {}),
+      };
       if (typeof args.edit_improvement_number === "number") {
         const idx = args.edit_improvement_number - 1;
         if (idx < 0 || idx >= improvements.length)
@@ -1961,6 +2034,51 @@ async function execTool(name: string, args: Args): Promise<unknown> {
         }
       }
       return out;
+    }
+    case "github_prs": {
+      const filter = (args.repo ?? "").trim().toLowerCase();
+      const { prs, errors } = await listAllOpenPrs();
+      const repos = await listConfiguredRepos();
+      if (!repos.length) return { error: "No repos configured — add one in the GitHub tab." };
+      const list = filter ? prs.filter((p) => p.repo.toLowerCase() === filter) : prs;
+      return {
+        count: list.length,
+        pulls: list.map((p) => ({
+          repo: p.repo, number: p.number, title: p.title, author: p.author,
+          branch: `${p.headRef} → ${p.baseRef}`, draft: p.draft, ci: p.status.state,
+        })),
+        ...(errors.length ? { errors } : {}),
+      };
+    }
+    case "github_status": {
+      const [owner, repo] = (args.repo ?? "").trim().split("/");
+      if (!owner || !repo) return { error: "give the repo as 'owner/repo'" };
+      const r = await getRepoStatus(owner, repo);
+      if (!r.ok) return { error: r.error };
+      return {
+        repo: r.data.repo, defaultBranch: r.data.defaultBranch, ci: r.data.status.state,
+        openPRs: r.data.openPrs,
+        checks: r.data.status.checks.map((c) => `${c.name}: ${c.conclusion}`),
+      };
+    }
+    case "github_pr_review": {
+      const [owner, repo] = (args.repo ?? "").trim().split("/");
+      const number = Number(args.number);
+      if (!owner || !repo || !Number.isInteger(number)) return { error: "give 'owner/repo' and a PR number" };
+      const mode = args.mode === "review" ? "review" : "summary";
+      const r = await summarizePr(owner, repo, number, mode);
+      if (!r.ok) return { error: r.error };
+      return { repo: `${owner}/${repo}`, number, mode, title: r.data.title, text: r.data.text };
+    }
+    case "health_status": {
+      const [results, self] = await Promise.all([runHealthChecks(), getSelfHealth()]);
+      return {
+        app: { ok: self.ok, db: self.db },
+        checks: results.map((c) => ({
+          name: c.name, up: c.ok, status: c.status, latencyMs: c.latencyMs, ...(c.error ? { error: c.error } : {}),
+        })),
+        summary: `${results.filter((c) => c.ok).length}/${results.length} checks up; app ${self.ok ? "healthy" : "unhealthy"}.`,
+      };
     }
     default:
       return { error: `unknown tool ${name}` };

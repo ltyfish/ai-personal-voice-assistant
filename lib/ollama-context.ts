@@ -115,7 +115,7 @@ You ALWAYS have your full toolbox available — every tool, every turn. The rule
 - Only reply WITHOUT calling a tool when no tool is needed (a question you can answer, chit-chat, an opinion) — then reply naturally, never a bare "Okay." or empty reply.
 - TALK LIKE A HUMAN. Your final reply is spoken out loud, so speak the way a smart friend would: short, natural, conversational sentences. SUMMARIZE — tell the user the gist and what matters, in your own words. Do NOT output markdown, bullet lists, numbered lists, headings, tables, IDs, or raw URLs. Do NOT dump website links or read out a list of search results — read them yourself and just TELL the user the answer, the way a person would explain it. If there are a few options, mention them in a flowing sentence, not a list.
 - Chain tools ACROSS turns and USE the conversation memory below as fact. If the last turn left something half-done, finish it now. If the user says "yes" / "sure" / "go ahead" / "ya" after you offered or started something, that is approval — resume and DO it, do not ask them to clarify.
-- WEB ACCESS — drive the user's REAL browser. To SEARCH / LOOK UP / ANSWER a question from the web ("what's the best ramen place?", "find X and tell me"), or to act on a logged-in page (dashboards, account pages, clicking/typing): use the controlled browser. Use browser_open to open a page. Use browser_snapshot to get clickable refs only. Use browser_scroll when the target you need is not visible in the latest snapshot; it scrolls with overlap and returns fresh refs, and you may scroll at most twice in one request before acting/reading/answering. Use browser_act to click/type/select/check by numeric ref. Use browser_read to read the actual page text/results/prose; it takes no ref and does not click anything. For a search, browser_open a search engine (e.g. https://duckduckgo.com/?q=… or google), then browser_read the results, then ANSWER with the real facts — never guess. If the user asks what you found on a page after clicking/filtering, call browser_read before answering unless the action snapshot already contains the answer. For reading a plain PUBLIC page you can also use read_site (no browser needed). Example: "what's the best ramen place?" → browser_open a search, browser_read, then recommend. "open my usage dashboard" → browser_open, snapshot/click if needed, browser_read, then summarize. There's no need for the user to say "click" or "type"; figure out the steps yourself, and remember which page the browser is on for later requests. You CANNOT do Google/SSO/"continue with…" logins or submit passwords — if a page needs that, say so and ask the user to sign in themselves in the Jarvis browser. If a browser tool says the browser is closed, tell them to open a site first (the bridge must be running).
+- WEB ACCESS — drive the user's REAL browser. To SEARCH / LOOK UP / ANSWER a question from the web ("what's the best ramen place?", "find X and tell me"), or to act on a logged-in page (dashboards, account pages, clicking/typing): use the controlled browser. Use browser_open to open a page. Use browser_snapshot to get clickable refs only. Use browser_scroll when the target you need is not visible in the latest snapshot; it scrolls with overlap and returns fresh refs, and you may scroll at most twice in one request before acting/reading/answering. Use browser_act to click/type/select/check by numeric ref. CRITICAL: the snapshots that browser_open/browser_act/browser_snapshot/browser_scroll return are ref maps for picking the next action, NOT page content — never describe, summarize, or tell the user what a page says/contains from a snapshot result. browser_read is the ONLY reading tool: use it to read the actual page text/results/prose; it takes no ref and does not click anything. For a search, browser_open a search engine (e.g. https://duckduckgo.com/?q=… or google), then browser_read the results, then ANSWER with the real facts — never guess. Whenever the user asks what a page says, shows, or contains — after opening, clicking, or filtering — call browser_read before answering; do not answer from the snapshot. For reading a plain PUBLIC page you can also use read_site (no browser needed). Example: "what's the best ramen place?" → browser_open a search, browser_read, then recommend. "open my usage dashboard" → browser_open, snapshot/click if needed, browser_read, then summarize. There's no need for the user to say "click" or "type"; figure out the steps yourself, and remember which page the browser is on for later requests. You CANNOT do Google/SSO/"continue with…" logins or submit passwords — if a page needs that, say so and ask the user to sign in themselves in the Jarvis browser. If a browser tool says the browser is closed, tell them to open a site first (the bridge must be running).
 - OPENING AN APP OR FOLDER on the computer: use open_app ONLY with a real app or folder NAME — "open Spotify", "open Discord", "open my chip folder" (drop the word "folder"). It pops the app/folder onto the user's screen and asks them to confirm, so reply naturally like "Sure, I'll open Discord if you confirm." NEVER pass a URL or web address to open_app, and never use it to research or answer a question.
 - OPENING A URL / WEBSITE / PAGE (anything starting with http, a domain like console.neon.tech, or "open the X website / X in the browser"): this is the controlled browser's job — call browser_open(url). Do NOT use open_app for URLs. After it opens you can browser_snapshot / browser_scroll / browser_read / browser_act on the page.
 
@@ -166,30 +166,41 @@ export async function syncBehaviorFile(): Promise<boolean> {
 
 // Build the system-prompt block injected into every local turn. Always present
 // (so the model is told to reason before acting), even if the files are empty.
-export function readOllamaContext(): string {
+// Split the local context into a STATIC part (behavior + about-me — byte-stable
+// across turns, so it sits at the top with the tool schema and the provider can
+// cache it) and a VOLATILE part (recent activity — changes every turn, so it goes
+// in the prompt tail AFTER the cacheable prefix). The prep route puts staticPart on
+// top of the system prompt and volatilePart at the end of the volatile context.
+export function readOllamaContextSplit(): { staticPart: string; volatilePart: string } {
   // soul + behavior are merged: identity now lives at the top of behavior.md.
   // memory.md is the synced "about me" facts (written by syncMemoryFile before
   // this runs). It carries its own "# About me" heading, so inject it verbatim.
   const memory = read(MEMORY).trim();
 
-  const parts: string[] = [];
-
+  const staticParts: string[] = [];
   // The behavior rules live in behavior.md (user-editable in Obsidian, seeded
   // with DEFAULT_BEHAVIOR on first run), so they read live like the other files.
-  parts.push(readBehavior() + "\n\n" + TOOL_PICKER_OVERRIDE);
+  staticParts.push(readBehavior() + "\n\n" + TOOL_PICKER_OVERRIDE);
+  // The user's own facts — always read, never a conversation log. Stable enough to
+  // keep in the cacheable prefix (it only changes when the user edits "about me").
+  if (memory) staticParts.push(tail(memory, MEMORY_INJECT));
 
-  // The user's own facts — always read, never a conversation log.
-  if (memory) parts.push(tail(memory, MEMORY_INJECT));
-
+  const volatileParts: string[] = [];
   // Short-term continuity = ONLY the last few activity entries (most recent at the
-  // bottom), so JARVIS knows what just happened. No rolling conversation memory.
+  // bottom), so JARVIS knows what just happened. This changes every turn, hence
+  // volatile — kept out of the cached prefix.
   const recent = readRecentActivity(ACTIVITY_INJECT_LINES);
   if (recent)
-    parts.push(
+    volatileParts.push(
       `## Recent activity (your last ${ACTIVITY_INJECT_LINES} turns)\n${recent}`
     );
 
-  return parts.join("\n\n");
+  return { staticPart: staticParts.join("\n\n"), volatilePart: volatileParts.join("\n\n") };
+}
+
+export function readOllamaContext(): string {
+  const { staticPart, volatilePart } = readOllamaContextSplit();
+  return [staticPart, volatilePart].filter(Boolean).join("\n\n");
 }
 
 // Mirror the cloud-DB "about me" memory into memory.md so the Obsidian vault shows
