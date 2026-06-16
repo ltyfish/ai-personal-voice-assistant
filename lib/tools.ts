@@ -12,7 +12,7 @@ import { sendMessage, type Channel } from "@/lib/messaging";
 import { listContacts, upsertContact, deleteContact } from "@/lib/contacts";
 import { importGoogleContacts, createGoogleContact } from "@/lib/google-contacts";
 import { isTelegramUserConfigured, importTelegramContacts } from "@/lib/telegram-user";
-import { listAllOpenPrs, getRepoStatus, summarizePr, listConfiguredRepos } from "@/lib/github";
+import { listAllOpenPrs, getRepoStatus, summarizePr, listConfiguredRepos, listReposHealth } from "@/lib/github";
 import { runAll as runHealthChecks, getSelfHealth } from "@/lib/health";
 
 // JSON-schema tool definitions handed to the Groq LLM.
@@ -871,6 +871,15 @@ export const toolDefs = [
   {
     type: "function" as const,
     function: {
+      name: "github_health",
+      description:
+        "A 'what needs attention' digest across the user's configured GitHub repos: default-branch CI state, last-activity recency, open issues and open PR counts — useful even when no PRs are open. Use for 'how are my repos', 'anything broken on github', 'project status', 'what should I look at'.",
+      parameters: { type: "object", properties: {} },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
       name: "health_status",
       description:
         "Run the project health checks and report which sites/endpoints are up or down (with latency), plus this app's own self-health (database + config). Use for 'is my site up', 'health status', 'is everything online'.",
@@ -1036,7 +1045,7 @@ const TOOL_GROUPS: { key: GroupKey; tools: string[]; re: RegExp }[] = [
   {
     key: "github",
     // PRs / repo CI status / PR review + project health/uptime checks.
-    tools: ["github_prs", "github_status", "github_pr_review", "health_status"],
+    tools: ["github_prs", "github_status", "github_health", "github_pr_review", "health_status"],
     re: /\b(github|pull request|pull requests|\bpr\b|\bprs\b|repo|repository|\bci\b|build status|merge|health|uptime|status check)\b|\bis\b.{0,20}\b(up|down|online|offline|healthy)\b/i,
   },
 ];
@@ -2069,6 +2078,39 @@ async function execTool(name: string, args: Args): Promise<unknown> {
       const r = await summarizePr(owner, repo, number, mode);
       if (!r.ok) return { error: r.error };
       return { repo: `${owner}/${repo}`, number, mode, title: r.data.title, text: r.data.text };
+    }
+    case "github_health": {
+      const repos = await listReposHealth();
+      if (!repos.length) return { error: "No repos configured — add one in the GitHub tab." };
+      const STALE_DAYS = 14;
+      const now = Date.now();
+      const daysSince = (iso: string) => (iso ? Math.floor((now - new Date(iso).getTime()) / 86400000) : null);
+      // "needs attention" = CI red, has failing checks, or stale (no push in 2 weeks).
+      const attention = repos
+        .filter((r) => !r.error && (r.ci === "failure" || r.ci === "error" || r.failingChecks.length > 0 || (daysSince(r.pushedAt) ?? 0) >= STALE_DAYS))
+        .map((r) => {
+          const reasons: string[] = [];
+          if (r.ci === "failure" || r.ci === "error") reasons.push("CI failing");
+          if (r.failingChecks.length) reasons.push(`failing checks: ${r.failingChecks.slice(0, 3).join(", ")}`);
+          const d = daysSince(r.pushedAt);
+          if (d != null && d >= STALE_DAYS) reasons.push(`no push in ${d} days`);
+          return { repo: r.repo, reasons };
+        });
+      return {
+        repos: repos.map((r) => ({
+          repo: r.repo,
+          ci: r.error ? "n/a" : r.ci,
+          openPRs: r.openPrs,
+          openIssues: r.openIssues,
+          lastPushDaysAgo: daysSince(r.pushedAt),
+          ...(r.failingChecks.length ? { failingChecks: r.failingChecks } : {}),
+          ...(r.error ? { error: r.error } : {}),
+        })),
+        needsAttention: attention,
+        summary: attention.length
+          ? `${attention.length} of ${repos.length} repo(s) need attention: ${attention.map((a) => `${a.repo} (${a.reasons.join("; ")})`).join("; ")}.`
+          : `All ${repos.length} repo(s) look healthy — CI green and recent activity.`,
+      };
     }
     case "health_status": {
       const [results, self] = await Promise.all([runHealthChecks(), getSelfHealth()]);

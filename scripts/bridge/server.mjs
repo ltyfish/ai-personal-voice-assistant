@@ -101,8 +101,11 @@ const fllmHeaders = (extra = {}) => {
 // (platform/label/status/enabled) and models — so there's no decryption and no
 // password/key required. Node 22's experimental node:sqlite reads it read-only.
 // Forward slashes work on Windows node and avoid backslash-escaping pitfalls.
+// Never hardcode a username: derive the default from THIS user's home so the same
+// build works on every machine. FREELLMAPI_DB overrides everything.
 const FLLM_DB_CANDIDATES = [
   process.env.FREELLMAPI_DB,
+  join(homedir(), "Downloads", "FreeLLMAPI", "freellmapi", "server", "data", "freeapi.db"),
   "C:/Users/User/Downloads/FreeLLMAPI/freellmapi/server/data/freeapi.db",
 ].filter(Boolean);
 async function readFllmDb() {
@@ -320,7 +323,18 @@ const MODEL_SYNC = !/^(0|false|no|off)$/i.test(process.env.BRIDGE_MODEL_SYNC || 
 // Where the app lives. SITE_URL (from .env.local) points at the deployed app;
 // fall back to a local `npm run dev`. /api/models needs no auth (local config).
 const JARVIS_URL = (process.env.JARVIS_URL || process.env.SITE_URL || "http://localhost:3000").replace(/\/+$/, "");
-const JARVIS_VAULT = process.env.JARVIS_VAULT || "C:\\Users\\User\\Downloads\\Projects\\Jarvis Personal AI";
+// Machine-agnostic vault path: env var wins, else pick whichever known layout
+// exists under this user's home (the Projects\Projects depth differs per machine,
+// and the username must never be hardcoded).
+const JARVIS_VAULT = (() => {
+  if (process.env.JARVIS_VAULT) return process.env.JARVIS_VAULT;
+  const home = homedir();
+  const candidates = [
+    join(home, "Downloads", "Projects", "Projects", "Jarvis Personal AI"),
+    join(home, "Downloads", "Projects", "Jarvis Personal AI"),
+  ];
+  return candidates.find((p) => existsSync(p)) ?? candidates[0];
+})();
 const MODEL_SYNC_MS = Number(process.env.BRIDGE_MODEL_SYNC_MS) || 60_000;
 // Two-way mirror of the per-model daily/rate CAPS that live in freellmapi's own
 // sqlite DB (the `models` table: tpd_limit / rpd_limit / rpm_limit). These caps

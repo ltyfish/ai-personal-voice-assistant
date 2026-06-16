@@ -6,7 +6,7 @@
 
 import { getGroqStats } from "./mail/blobs";
 import { getModelConfig } from "./model-config";
-import { getPlatformAvailability } from "./llm-router";
+import { getPlatformAvailability, disabledModelIds } from "./llm-router";
 import { MODELS, type Provider } from "./models";
 
 // Registry provider → the router's key-pool platform name (llm_keys.platform).
@@ -33,10 +33,14 @@ export async function computeModelStatus(): Promise<{
   activeId: string | null;
   exhaustedIds: string[];
 }> {
-  const [stats, cfg, platformAvail] = await Promise.all([
+  const [stats, cfg, platformAvail, routerDisabled] = await Promise.all([
     getGroqStats(),
     getModelConfig(),
     getPlatformAvailability().catch(() => ({} as Record<string, { total: number; available: number; soonestResetAt: string | null }>)),
+    // Models disabled on the LLM Keys page (llm_models.enabled = false), keyed by
+    // "<platform>/<model>". The agent's chain must skip these too, or a model the
+    // user turned off there keeps getting rotated into voice turns.
+    disabledModelIds().catch(() => new Set<string>()),
   ]);
   const disabled = new Set(cfg.disabled);
   const now = Date.now();
@@ -52,7 +56,7 @@ export async function computeModelStatus(): Promise<{
     const lim = stats.limits[m.id];
     const exhausted = !!(lim?.dailyResetAt && new Date(lim.dailyResetAt).getTime() > now);
     if (exhausted) exhaustedIds.push(m.id);
-    const enabled = !disabled.has(m.id);
+    const enabled = !disabled.has(m.id) && !routerDisabled.has(`${platform}/${m.id}`);
     // Live 429 cooldown: the platform has keys but every one is cooling right now.
     const cooledDown = !!(avail && avail.total > 0 && avail.available === 0);
     // A cooled-down model isn't a candidate for "active" either (it can't run now).

@@ -22,12 +22,25 @@ import {
   mkdirSync,
 } from "node:fs";
 import { join } from "node:path";
+import { homedir } from "node:os";
 import { toolDefs } from "./tools";
 import { getMemory, renderMemoryMarkdown } from "./memory";
 import { saveBehavior } from "./behavior";
 
-const DIR =
-  process.env.OLLAMA_DIR || "C:\\Users\\User\\Downloads\\Projects\\Ollama";
+// Resolve the local "soul" folder so it works on every machine without a
+// per-machine env var: OLLAMA_DIR wins if set; otherwise pick whichever known
+// layout actually exists under THIS user's home (folder depth differs between
+// machines — some have Downloads\Projects\Ollama, others
+// Downloads\Projects\Projects\Ollama). Never hardcodes a username.
+const DIR = (() => {
+  if (process.env.OLLAMA_DIR) return process.env.OLLAMA_DIR;
+  const home = homedir();
+  const candidates = [
+    join(home, "Downloads", "Projects", "Projects", "Ollama"),
+    join(home, "Downloads", "Projects", "Ollama"),
+  ];
+  return candidates.find((p) => existsSync(p)) ?? candidates[0];
+})();
 const MEMORY = join(DIR, "memory.md");
 const DECISION = join(DIR, "decision.md");
 const BEHAVIOR = join(DIR, "behavior.md");

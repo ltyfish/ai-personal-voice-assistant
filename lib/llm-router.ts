@@ -15,11 +15,14 @@
 import { and, eq, isNull, or, lte, sql } from "drizzle-orm";
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { homedir } from "node:os";
 import { db, llmKeys, llmModels, llmUsage, mailKv } from "@/db";
 import type { LlmKey } from "@/db";
 import { getRouterConfig } from "./router-config";
 import { pushRouterEvent } from "./router-feed";
 import { byBestModel } from "./model-rank";
+import { getModelConfig } from "./model-config";
+import { MODELS } from "./models";
 
 type ProviderConfig = {
   baseUrl: string;
@@ -64,8 +67,18 @@ export function listPlatforms(): string[] {
 // serverError / network are short fixed back-offs (transient). rateLimit (429/
 // 413) and client errors (4xx) are user-tunable via router-config — see Budget.
 const COOLDOWN_MS = { serverError: 20_000, network: 30_000 };
-const JARVIS_VAULT =
-  process.env.JARVIS_VAULT || "C:\\Users\\User\\Downloads\\Projects\\Jarvis Personal AI";
+// Same machine-agnostic resolution as the Ollama dir: env var wins, else pick
+// whichever known vault layout exists under this user's home (never hardcode a
+// username, and tolerate the differing Projects\Projects depth across machines).
+const JARVIS_VAULT = (() => {
+  if (process.env.JARVIS_VAULT) return process.env.JARVIS_VAULT;
+  const home = homedir();
+  const candidates = [
+    join(home, "Downloads", "Projects", "Projects", "Jarvis Personal AI"),
+    join(home, "Downloads", "Projects", "Jarvis Personal AI"),
+  ];
+  return candidates.find((p) => existsSync(p)) ?? candidates[0];
+})();
 const ROUTER_COOLDOWNS_FILE = join(JARVIS_VAULT, "Router Cooldowns.md");
 const FAILURE_MARKER = "## Recent router failures";
 const MODEL_COOLDOWN_NS = "router_model_cooldown";
@@ -521,12 +534,39 @@ async function enabledPlatforms(): Promise<Set<string>> {
   return new Set(rows.map((r) => r.platform));
 }
 
-async function disabledModelIds(): Promise<Set<string>> {
+// The deck's model toggle stores registry ids (no platform prefix, e.g.
+// "meta/llama-4-maverick-17b-128e-instruct") in model-config. Translate those to
+// the router's "<platform>/<model>" space so a model disabled on the deck is ALSO
+// skipped by auto rotation — the two disable surfaces must agree (the registry's
+// "gemini" provider maps to the router's "google" platform).
+async function configDisabledRouterIds(): Promise<Set<string>> {
+  try {
+    const cfg = await getModelConfig();
+    const out = new Set<string>();
+    for (const id of cfg.disabled) {
+      const def = MODELS.find((m) => m.id === id);
+      if (!def) continue;
+      const platform = def.provider === "gemini" ? "google" : def.provider;
+      out.add(`${platform}/${id}`);
+    }
+    return out;
+  } catch {
+    return new Set();
+  }
+}
+
+// Every model the user has turned off, from BOTH disable surfaces: the LLM Keys
+// page (llm_models.enabled = false) and the deck (model-config). Keyed by the
+// router's "<platform>/<model>" id. Exported so model-status.ts can mirror the
+// same combined view into the agent's fallback chain.
+export async function disabledModelIds(): Promise<Set<string>> {
   const rows = await db
     .select({ platform: llmModels.platform, model: llmModels.model })
     .from(llmModels)
     .where(eq(llmModels.enabled, false));
-  return new Set(rows.map((r) => `${r.platform}/${r.model}`));
+  const set = new Set(rows.map((r) => `${r.platform}/${r.model}`));
+  for (const id of await configDisabledRouterIds()) set.add(id);
+  return set;
 }
 
 async function fallbackAutoChain(): Promise<string[]> {
@@ -538,13 +578,19 @@ async function autoChain(): Promise<string[]> {
   try {
     const platforms = await enabledPlatforms();
     if (!platforms.size) return await fallbackAutoChain();
-    const rows = await db
-      .select({ platform: llmModels.platform, model: llmModels.model })
-      .from(llmModels)
-      .where(eq(llmModels.enabled, true));
+    const [rows, disabled] = await Promise.all([
+      db
+        .select({ platform: llmModels.platform, model: llmModels.model })
+        .from(llmModels)
+        .where(eq(llmModels.enabled, true)),
+      // Also honour deck disables: a model toggled off in model-config has no
+      // llm_models row flipped, so filter it out here too.
+      configDisabledRouterIds(),
+    ]);
     const catalog = rows
       .filter((m) => platforms.has(m.platform) && PROVIDERS[m.platform])
-      .map((m) => `${m.platform}/${m.model}`);
+      .map((m) => `${m.platform}/${m.model}`)
+      .filter((id) => !disabled.has(id));
     const unique = [...new Set(catalog)].sort(byBestModel((m) => m));
     if (unique.length) return await filterAvailableModels(unique);
     return await fallbackAutoChain();

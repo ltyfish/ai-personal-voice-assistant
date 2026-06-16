@@ -216,6 +216,54 @@ export async function getRepoStatus(owner: string, repo: string, token?: string)
   };
 }
 
+// ── repo health (PR-free signals: CI on default branch, activity, issues) ─────
+export type RepoHealth = {
+  repo: string;
+  defaultBranch: string;
+  ci: string; // success | failure | pending | none
+  pushedAt: string; // ISO of last push, or ""
+  openIssues: number; // GitHub's open_issues_count INCLUDES open PRs
+  openPrs: number;
+  failingChecks: string[]; // names of non-success checks on the head commit
+  error?: string;
+};
+
+// Health for one repo with a minimal set of calls: repo meta (branch, activity,
+// issue count) → head commit sha → CI status of that commit. Errors are returned
+// in-band so one bad repo never throws the whole list.
+export async function getRepoHealth(owner: string, repo: string, token?: string): Promise<RepoHealth> {
+  const base: RepoHealth = { repo: `${owner}/${repo}`, defaultBranch: "", ci: "none", pushedAt: "", openIssues: 0, openPrs: 0, failingChecks: [] };
+  if (!isValidRepo(owner, repo)) return { ...base, error: "Invalid owner/repo." };
+  const tok = token ?? (await getToken());
+  const meta = await gh<{ default_branch?: string; open_issues_count?: number; pushed_at?: string }>(`/repos/${owner}/${repo}`, tok);
+  if (!meta.ok) return { ...base, error: meta.error };
+  const branch = meta.data.default_branch || "main";
+  const head = await gh<{ sha?: string }>(`/repos/${owner}/${repo}/commits/${branch}`, tok);
+  const status = head.ok && head.data.sha ? await getPrStatus(owner, repo, head.data.sha, tok) : { state: "none", checks: [] };
+  const prs = await listPullRequests(owner, repo, tok);
+  const openPrs = prs.ok ? prs.data.length : 0;
+  return {
+    repo: `${owner}/${repo}`,
+    defaultBranch: branch,
+    ci: status.state,
+    pushedAt: meta.data.pushed_at || "",
+    // open_issues_count counts PRs too; subtract them so this reads as real issues.
+    openIssues: Math.max(0, (meta.data.open_issues_count || 0) - openPrs),
+    openPrs,
+    failingChecks: status.checks.filter((c) => c.conclusion !== "success" && c.conclusion !== "neutral" && c.conclusion !== "skipped").map((c) => c.name),
+  };
+}
+
+// Health across every configured repo, freshest activity first.
+export async function listReposHealth(token?: string): Promise<RepoHealth[]> {
+  const tok = token ?? (await getToken());
+  const repos = await listConfiguredRepos();
+  const out: RepoHealth[] = [];
+  for (const { owner, repo } of repos) out.push(await getRepoHealth(owner, repo, tok));
+  out.sort((a, b) => (b.pushedAt || "").localeCompare(a.pushedAt || ""));
+  return out;
+}
+
 // ── summarize / review a PR via the rotating router ──────────────────────────
 const PATCH_BUDGET = 12_000; // total chars of diff fed to the model (token guard)
 

@@ -15,9 +15,22 @@ type PullRequest = {
   number: number; title: string; author: string; headRef: string; baseRef: string;
   draft: boolean; url: string; updatedAt: string; repo: string; status: PrStatus;
 };
+type RepoHealth = { repo: string; defaultBranch: string; ci: string; pushedAt: string; openIssues: number; openPrs: number; failingChecks: string[]; error?: string };
 type HealthCheck = { id: string; name: string; url: string; method: string; expectStatus?: number };
 type CheckResult = { id: string; name: string; url: string; ok: boolean; status: number | null; latencyMs: number | null; error?: string; checkedAt: string };
 type SelfHealth = { ok: boolean; time: string; db: boolean; env: { name: string; present: boolean }[] };
+
+function timeAgo(iso: string): string {
+  if (!iso) return "—";
+  const ms = Date.now() - new Date(iso).getTime();
+  if (!Number.isFinite(ms) || ms < 0) return "—";
+  const m = Math.floor(ms / 60000);
+  if (m < 60) return `${m}m ago`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h}h ago`;
+  const d = Math.floor(h / 24);
+  return d < 30 ? `${d}d ago` : `${Math.floor(d / 30)}mo ago`;
+}
 
 function statusColor(state: string): string {
   if (state === "success") return "#4ade80";
@@ -43,6 +56,9 @@ export default function GitHub() {
   const [prs, setPrs] = useState<PullRequest[]>([]);
   const [prErrors, setPrErrors] = useState<string[]>([]);
   const [prLoading, setPrLoading] = useState(false);
+  // repo health (PR-free signals)
+  const [health, setHealth] = useState<RepoHealth[]>([]);
+  const [healthLoading, setHealthLoading] = useState(false);
   const [summary, setSummary] = useState<Record<string, { busy: boolean; text?: string; mode?: string }>>({});
   // health
   const [checks, setChecks] = useState<HealthCheck[]>([]);
@@ -74,6 +90,14 @@ export default function GitHub() {
       setPrErrors(Array.isArray(d.errors) ? d.errors : []);
     } catch { /* ignore */ } finally { setPrLoading(false); }
   }, []);
+  const loadRepoHealth = useCallback(async () => {
+    setHealthLoading(true);
+    try {
+      const r = await fetch("/api/github/health", { cache: "no-store" });
+      const d = await r.json();
+      setHealth(Array.isArray(d.repos) ? d.repos : []);
+    } catch { /* ignore */ } finally { setHealthLoading(false); }
+  }, []);
   const loadHealth = useCallback(async () => {
     try {
       const r = await fetch("/api/health/checks", { cache: "no-store" });
@@ -84,7 +108,7 @@ export default function GitHub() {
   }, []);
 
   useEffect(() => { loadToken(); loadRepos(); loadHealth(); }, [loadToken, loadRepos, loadHealth]);
-  useEffect(() => { if (tokenInfo?.hasToken && repos.length) loadPrs(); }, [tokenInfo?.hasToken, repos.length, loadPrs]);
+  useEffect(() => { if (tokenInfo?.hasToken && repos.length) { loadPrs(); loadRepoHealth(); } }, [tokenInfo?.hasToken, repos.length, loadPrs, loadRepoHealth]);
 
   async function saveToken() {
     const token = tokenInput.trim();
@@ -198,6 +222,38 @@ export default function GitHub() {
           )}
         </div>
       </details>
+
+      {/* Repo health (useful even with zero open PRs) */}
+      <section className="a-card" style={{ marginTop: 12 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <h3 style={{ margin: 0, flex: 1 }}>Repo health</h3>
+          <button className="a-btn a-btn-ghost" disabled={healthLoading || !tokenInfo?.hasToken} onClick={loadRepoHealth}>{healthLoading ? "Refreshing…" : "↻ Refresh"}</button>
+        </div>
+        {!tokenInfo?.hasToken ? (
+          <p className="tab-sub">Add a GitHub token above to load repo health.</p>
+        ) : health.length === 0 ? (
+          <p className="tab-sub">{healthLoading ? "Loading…" : "No repos configured."}</p>
+        ) : (
+          <div style={{ display: "grid", gap: 6, marginTop: 10 }}>
+            {health.map((h) => (
+              <div key={h.repo} style={{ display: "flex", alignItems: "center", gap: 10, padding: "7px 10px", borderRadius: 8, border: "1px solid var(--border)", background: "var(--a-dim)" }}>
+                <span title={`CI: ${h.error ? "n/a" : h.ci}`} style={{ color: statusColor(h.error ? "" : h.ci), fontWeight: 700 }}>{statusIcon(h.error ? "" : h.ci)}</span>
+                <span style={{ minWidth: 160, fontSize: 12.5, fontWeight: 600 }}>{h.repo}</span>
+                {h.error ? (
+                  <span style={{ flex: 1, fontSize: 11.5, color: "#f87171" }}>{h.error}</span>
+                ) : (
+                  <span style={{ flex: 1, fontSize: 11.5, opacity: 0.7, display: "flex", gap: 10, flexWrap: "wrap" }}>
+                    <span>updated {timeAgo(h.pushedAt)}</span>
+                    <span>{h.openPrs} PR{h.openPrs === 1 ? "" : "s"}</span>
+                    <span>{h.openIssues} issue{h.openIssues === 1 ? "" : "s"}</span>
+                    {h.failingChecks.length > 0 && <span style={{ color: "#f87171" }}>failing: {h.failingChecks.slice(0, 3).join(", ")}{h.failingChecks.length > 3 ? "…" : ""}</span>}
+                  </span>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+      </section>
 
       {/* PRs */}
       <section className="a-card" style={{ marginTop: 12 }}>
