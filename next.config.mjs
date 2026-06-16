@@ -13,9 +13,14 @@ const isProdBuild =
   cmds.includes(process.env.npm_lifecycle_event) ||
   process.argv.slice(2).some((a) => cmds.includes(a));
 
+// On Vercel there's no local dev server to protect, and Vercel's Next.js
+// detection expects the default ".next" (it looks for .next/routes-manifest.json).
+// So the ".next-build" split is LOCAL-ONLY — skip it whenever building in CI/Vercel.
+const isVercel = !!process.env.VERCEL;
+
 /** @type {import('next').NextConfig} */
 const nextConfig = {
-  distDir: isProdBuild ? ".next-build" : ".next",
+  distDir: isProdBuild && !isVercel ? ".next-build" : ".next",
   // Expose the rotating proxy at a clean OpenAI base URL (/v1/...) in addition
   // to its real /api/v1/... route, so any OpenAI client can use `${origin}/v1`.
   async rewrites() {
