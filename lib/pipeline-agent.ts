@@ -15,16 +15,16 @@
 
 import { routerChat, execBrowserTool, BROWSER_TOOLS } from "./local-agent";
 import { runShell } from "./bridge";
+import { PIPELINE_DEFAULTS, type PipelineConfig } from "./pipeline-config";
 
 const CODING_FILE_TOOL_NAMES = new Set(["read_file", "write_file", "edit_file", "list_dir"]);
-const MAX_ROUNDS = 30;
 
 // Token control: tool results are the bulk of a phase's growing context (a single
 // read_file can be thousands of chars, re-sent every round). We cap each result
 // and, once it's a couple of rounds old, collapse it to a one-line stub — the
 // model has already acted on it, so the full text no longer needs to be re-sent.
-const TOOL_RESULT_CAP = 2500; // max chars kept for a fresh tool result
-const KEEP_FULL_ROUNDS = 2;   // keep the last N rounds' results verbatim; older ones get stubbed
+// The caps + step budget + retry/stuck thresholds are all user-tunable via
+// PipelineConfig (lib/pipeline-config.ts); a run with no cfg uses the defaults.
 
 // A successful command matching this is treated as a real verification (build /
 // typecheck / test / lint), kept language-agnostic so it works across stacks.
@@ -51,6 +51,25 @@ const TEAM_LABEL: Record<Phase, string> = {
   executing: "Execution",
   reviewing: "Review & Test",
 };
+
+export type Difficulty = "easy" | "medium" | "hard";
+
+// Smart execution routing. The team chain comes in best→worst (sorted by model
+// rank). We reorder it so the FIRST model matches the task's difficulty and any
+// escalation climbs toward MORE capable models (never down to a weaker one):
+//   hard   → unchanged (strongest first; nothing stronger to climb to)
+//   medium → start at the middle model, then climb the stronger half, weaker tail last
+//   easy   → weakest first, climbing up to the strongest only if the weak ones fail
+// Easy tasks therefore spend cheap-model quota and reserve the strong models for
+// hard work, while a wrong guess still self-heals by escalating upward.
+export function orderChainForDifficulty(chain: string[], difficulty: Difficulty): string[] {
+  if (chain.length <= 1 || difficulty === "hard") return [...chain];
+  if (difficulty === "easy") return [...chain].reverse();
+  const mid = Math.floor(chain.length / 2);
+  const fromMidUp = chain.slice(0, mid + 1).reverse(); // middle → strongest
+  const weakerTail = chain.slice(mid + 1); // weaker than middle, last resort
+  return [...fromMidUp, ...weakerTail];
+}
 
 function describeCall(name: string, args: any): { summary: string; detail?: string } {
   const a = args || {};
@@ -166,9 +185,13 @@ export async function runPhase(
   projectId: string,
   phase: Phase,
   models: string[],
-  opts: { onProgress: Progress; signal?: AbortSignal; runningPhase?: string }
+  opts: { onProgress: Progress; signal?: AbortSignal; runningPhase?: string; cfg?: PipelineConfig }
 ): Promise<PhaseResult> {
   const { onProgress, signal } = opts;
+  const cfg = opts.cfg ?? PIPELINE_DEFAULTS;
+  const MAX_ROUNDS = cfg.maxRoundsPerPhase;
+  const TOOL_RESULT_CAP = cfg.toolResultCap;
+  const KEEP_FULL_ROUNDS = cfg.keepFullRounds;
   const stopped = () => signal?.aborted;
   const team = TEAM_LABEL[phase];
 
@@ -223,8 +246,12 @@ export async function runPhase(
     for (const m of toolMeta) {
       if (m.stubbed || m.round > currentRound - KEEP_FULL_ROUNDS) continue;
       const msg = messages[m.idx];
-      if (msg && typeof msg.content === "string" && msg.content.length > 160) {
-        msg.content = `[earlier result elided to save context] ${m.brief}`;
+      if (!msg || typeof msg.content !== "string") continue;
+      const stub = `[earlier result elided to save context] ${m.brief}`;
+      // Stub any aged result that's longer than its stub — the model already
+      // acted on it, so re-sending the full text every round just burns tokens.
+      if (msg.content.length > stub.length) {
+        msg.content = stub;
         m.stubbed = true;
       }
     }
@@ -237,13 +264,13 @@ export async function runPhase(
   let verifyNudged = false;
 
   const sigCounts = new Map<string, number>();
-  const REPEAT_NUDGE_AT = 2;
-  const REPEAT_ABORT_AT = 5;
+  const REPEAT_NUDGE_AT = cfg.repeatNudgeAt;
+  const REPEAT_ABORT_AT = cfg.repeatAbortAt;
 
   // Transient-failure auto-retry: a model/bridge call can fail for a blip
   // (network, model cold-start, rate limit). Retry the SAME model a few times
   // with a short backoff before giving up on it and escalating down the chain.
-  const MODEL_RETRY_MAX = 2;
+  const MODEL_RETRY_MAX = cfg.modelRetries;
   const sleep = (ms: number) => new Promise((res) => setTimeout(res, ms));
 
   function escalate(reason: string): boolean {
@@ -275,7 +302,7 @@ export async function runPhase(
       messages,
       tools: prep.tools,
       tool_choice: "auto",
-      temperature: 0.2,
+      temperature: cfg.temperature,
     };
     let r = await routerChat(chatBody);
     for (let attempt = 1; attempt <= MODEL_RETRY_MAX && (!r.ok || !r.completion) && !stopped(); attempt++) {

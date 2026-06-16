@@ -117,13 +117,15 @@ type Budget = {
   timeoutMs: number;
   cdRateLimit: number;
   cdClientError: number;
+  maxKeysPerModel: number; // 0 = walk every available key
 };
 function newBudget(
   timeoutMs: number,
   cdRateLimit: number,
   cdClientError: number,
+  maxKeysPerModel: number,
 ): Budget {
-  return { timeoutMs, cdRateLimit, cdClientError };
+  return { timeoutMs, cdRateLimit, cdClientError, maxKeysPerModel };
 }
 
 function splitModel(model: string): { platform: string; upstreamModel: string } | null {
@@ -621,6 +623,7 @@ export async function routeChatCompletion(body: any): Promise<RouteResult> {
     cfg.timeoutMs,
     cfg.cooldownRateLimitMs,
     cfg.cooldownClientErrorMs,
+    cfg.maxKeysPerModel,
   );
 
   // "auto" → rotate across the native model catalog. Each candidate gets exhaustive key
@@ -692,9 +695,12 @@ async function routeOne(
     };
   }
 
-  const keys = await candidateKeys(platform);
+  const allKeys = await candidateKeys(platform);
+  // Cap how many keys we try for this model on one call (0 = every key). LRU
+  // order means the freshest keys are tried first within the cap.
+  const keys = budget.maxKeysPerModel > 0 ? allKeys.slice(0, budget.maxKeysPerModel) : allKeys;
   console.log(
-    `[llm-router] ${platform}/${upstreamModel} — ${keys.length} key(s) available (LRU rotation)`
+    `[llm-router] ${platform}/${upstreamModel} — trying ${keys.length}/${allKeys.length} key(s) (LRU rotation)`
   );
   if (keys.length === 0) {
     pushRouterEvent({ kind: "nokeys", model: `${platform}/${upstreamModel}`, detail: "none enabled / all in cooldown" });

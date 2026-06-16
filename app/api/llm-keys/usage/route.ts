@@ -133,6 +133,57 @@ export async function GET() {
     })
     .sort(byBestModel((m) => m.model));
 
+  // ── Cross-provider leaderboard (best → worst) ──────────────────────────────
+  // Unlike the per-provider `models` board (which only lists providers you hold a
+  // key for), this lists EVERY known model — catalog ∪ fallback chain ∪ recorded
+  // usage — regardless of whether its provider has a key, so any model can be
+  // seen and DISABLED here (e.g. the NVIDIA Llama-4-Maverick fallback even with
+  // no NVIDIA key). Disabling persists via PATCH /api/llm-models (it upserts).
+  const tokensByModel = new Map<string, { today: number; total: number }>();
+  for (const u of usage) {
+    const k = mkKey(u.platform, u.model);
+    const t = tokensByModel.get(k) ?? { today: 0, total: 0 };
+    t.total += u.totalTokens;
+    t.today += u.todayDate === today ? u.todayTokens : 0;
+    tokensByModel.set(k, t);
+  }
+  const catalogEnabled = new Map<string, boolean>();
+  for (const c of catalog) catalogEnabled.set(mkKey(c.platform, c.model), c.enabled);
+
+  const lbSeen = new Set<string>();
+  const leaderboard: Array<{
+    platform: string; model: string; source: string; rank: number;
+    enabled: boolean; hasKey: boolean; cooledDown: boolean;
+    cooldownUntil: string | null; cooldownDetail: string | null;
+    todayTokens: number; totalTokens: number;
+  }> = [];
+  const addLb = (platform: string, model: string, source: string) => {
+    if (!platform || !model || !PROVIDERS[platform]) return;
+    const k = mkKey(platform, model);
+    if (lbSeen.has(k)) return;
+    lbSeen.add(k);
+    const cd = modelCooldowns[normalizeModelCooldownCatalogId(model)];
+    const tok = tokensByModel.get(k) ?? { today: 0, total: 0 };
+    leaderboard.push({
+      platform, model, source,
+      rank: modelRank(model),
+      enabled: catalogEnabled.get(k) ?? true,
+      hasKey: anyKey.has(platform),
+      cooledDown: !!cd,
+      cooldownUntil: cd?.until ?? null,
+      cooldownDetail: cd?.detail ?? null,
+      todayTokens: tok.today,
+      totalTokens: tok.total,
+    });
+  };
+  for (const c of catalog) addLb(c.platform, c.model, c.source || "catalog");
+  for (const id of FALLBACK_AUTO_CHAIN) {
+    const s = id.indexOf("/");
+    if (s > 0) addLb(id.slice(0, s), id.slice(s + 1), "fallback");
+  }
+  for (const u of usage) addLb(u.platform, u.model, "usage");
+  leaderboard.sort(byBestModel((m) => m.model));
+
   // Per-platform rollup.
   const providers = new Map<string, { platform: string; totalTokens: number; todayTokens: number; requests: number; keyCount: number }>();
   for (const k of keys) {
@@ -165,6 +216,7 @@ export async function GET() {
 
   return NextResponse.json({
     models: modelRows,
+    leaderboard,
     providers: [...providers.values()].sort((a, b) => a.platform.localeCompare(b.platform)),
     keys: keyRows,
   });

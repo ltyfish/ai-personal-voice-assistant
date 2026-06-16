@@ -6,6 +6,7 @@ import type { Summary } from "@/lib/mail/types";
 import Abilities from "@/components/Abilities";
 import Local from "@/components/Local";
 import LLMKeys from "@/components/LLMKeys";
+import GitHub from "@/components/GitHub";
 import ModelHud from "@/components/ModelHud";
 import MiniOrb from "@/components/jarvis/MiniOrb";
 import StatusIndicator from "@/components/jarvis/StatusIndicator";
@@ -14,7 +15,7 @@ import { notify, confirmDialog } from "@/lib/toast";
 import { useLocalPresence } from "@/lib/local-presence";
 
 type View = "feed" | "digest" | "urgency" | "settings";
-type Tab = "assistant" | "tasks" | "calendar" | "notes" | "projects" | "abilities" | "local" | "freellmapi" | View;
+type Tab = "assistant" | "tasks" | "calendar" | "notes" | "projects" | "abilities" | "local" | "freellmapi" | "github" | View;
 
 const URGENCY_LABELS = ["", "Minimal", "Low", "Medium", "High", "Critical"];
 const MORE_TAB_IDS = new Set<Tab>(["tasks", "notes", "projects", "feed", "digest", "urgency"]);
@@ -100,7 +101,8 @@ export default function MailApp({
     t === "projects" ||
     t === "abilities" ||
     t === "local" ||
-    t === "freellmapi";
+    t === "freellmapi" ||
+    t === "github";
 
   // If the computer goes offline while the Local tab is open, fall back to
   // JARVIS so the user never lingers on a dead tab.
@@ -128,6 +130,7 @@ export default function MailApp({
   const TABS: { id: Tab; label: string }[] = [
     { id: "freellmapi", label: "LLM Keys" },
     ...(localOnline ? [{ id: "local" as Tab, label: "Local" }] : []),
+    { id: "github", label: "GitHub" },
     ...(calendar ? [{ id: "calendar" as Tab, label: "Calendar" }] : []),
     { id: "abilities", label: "Abilities" },
     { id: "settings", label: "Settings" },
@@ -243,6 +246,11 @@ export default function MailApp({
           <div className={`view${tab === "freellmapi" ? " active" : ""}`}>
             <div className="modern-tab">
               <LLMKeys />
+            </div>
+          </div>
+          <div className={`view${tab === "github" ? " active" : ""}`}>
+            <div className="modern-tab">
+              <GitHub />
             </div>
           </div>
           {localOnline && (

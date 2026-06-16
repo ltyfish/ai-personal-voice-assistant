@@ -39,6 +39,13 @@ type UsageModel = {
   cooldownDetail?: string | null;
 };
 
+// Human duration for the cooldown sliders: ms -> "30s" / "30 min" / "2 h".
+function fmtMs(ms: number): string {
+  if (ms >= 3_600_000) return `${Math.round(ms / 3_600_000)} h`;
+  if (ms >= 60_000) return `${Math.round(ms / 60_000)} min`;
+  return `${Math.round(ms / 1000)}s`;
+}
+
 // Compact token count: 1234 -> "1.2k", 1_500_000 -> "1.5M".
 function fmtTok(n: number): string {
   if (!n) return "0";
@@ -47,9 +54,26 @@ function fmtTok(n: number): string {
   return String(n);
 }
 
+// One row of the cross-provider best→worst leaderboard. Includes models whose
+// provider has no key yet (so e.g. NVIDIA Maverick can be seen + disabled).
+type LeaderRow = {
+  platform: string;
+  model: string;
+  source: string;
+  rank: number;
+  enabled: boolean;
+  hasKey: boolean;
+  cooledDown: boolean;
+  cooldownUntil: string | null;
+  cooldownDetail: string | null;
+  todayTokens: number;
+  totalTokens: number;
+};
+
 export default function LLMKeys() {
   const [keys, setKeys] = useState<KeyRow[]>([]);
   const [usageModels, setUsageModels] = useState<UsageModel[]>([]);
+  const [leaderboard, setLeaderboard] = useState<LeaderRow[]>([]);
   const [platforms, setPlatforms] = useState<string[]>([]);
   const [loading, setLoading] = useState(true);
   const [platform, setPlatform] = useState("groq");
@@ -62,8 +86,9 @@ export default function LLMKeys() {
 
   // Rotation knobs persisted server-side so the serverless router reads them.
   // null until loaded.
-  type RouterCfg = { timeoutMs: number };
-  type RouterLimits = { timeoutMs: { min: number; max: number } };
+  type RouterCfg = { timeoutMs: number; cooldownRateLimitMs: number; cooldownClientErrorMs: number; maxKeysPerModel: number };
+  type Bound = { min: number; max: number };
+  type RouterLimits = { timeoutMs: Bound; cooldownRateLimitMs: Bound; cooldownClientErrorMs: Bound; maxKeysPerModel: Bound };
   const [routerCfg, setRouterCfg] = useState<RouterCfg | null>(null);
   const [routerLimits, setRouterLimits] = useState<RouterLimits | null>(null);
   const [routerBusy, setRouterBusy] = useState(false);
@@ -134,7 +159,10 @@ export default function LLMKeys() {
     try {
       const res = await fetch("/api/llm-keys/usage", { cache: "no-store" });
       const data = await res.json();
-      if (res.ok) setUsageModels(Array.isArray(data.models) ? data.models : []);
+      if (res.ok) {
+        setUsageModels(Array.isArray(data.models) ? data.models : []);
+        setLeaderboard(Array.isArray(data.leaderboard) ? data.leaderboard : []);
+      }
     } catch { /* leave as-is */ }
   }, []);
 
@@ -193,19 +221,49 @@ export default function LLMKeys() {
     load();
   }
 
-  async function toggleModel(m: UsageModel) {
-    const id = `${m.platform}/${m.model}`;
+  async function setModelEnabled(platform: string, model: string, enabled: boolean) {
+    const id = `${platform}/${model}`;
     setModelBusy(id);
     try {
       await fetch("/api/llm-models", {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ platform: m.platform, model: m.model, enabled: !m.enabled }),
+        body: JSON.stringify({ platform, model, enabled }),
       });
       await loadUsage();
     } finally {
       setModelBusy(null);
     }
+  }
+  const toggleModel = (m: UsageModel) => setModelEnabled(m.platform, m.model, !m.enabled);
+
+  // One router-knob slider: drags update local state, release persists (clamped
+  // server-side). Returns null until the config + bounds have loaded.
+  function cfgSlider(
+    key: keyof RouterCfg, label: string, hint: string, fmt: (v: number) => string, step: number
+  ) {
+    if (!routerCfg || !routerLimits) return null;
+    const lim = routerLimits[key];
+    return (
+      <label style={{ display: "block", fontSize: 13 }} title={hint}>
+        <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}>
+          <span>{label}</span>
+          <span className="mono" style={{ opacity: 0.8 }}>{fmt(routerCfg[key])}</span>
+        </div>
+        <input
+          type="range"
+          min={lim.min}
+          max={lim.max}
+          step={step}
+          value={routerCfg[key]}
+          disabled={routerBusy}
+          onChange={(e) => setRouterCfg({ ...routerCfg, [key]: Number(e.target.value) })}
+          onMouseUp={(e) => saveRouterCfg({ [key]: Number((e.target as HTMLInputElement).value) } as Partial<RouterCfg>)}
+          onTouchEnd={(e) => saveRouterCfg({ [key]: Number((e.target as HTMLInputElement).value) } as Partial<RouterCfg>)}
+          style={{ width: "100%" }}
+        />
+      </label>
+    );
   }
 
   // Group by platform for display.
@@ -281,28 +339,13 @@ export default function LLMKeys() {
           <span className="col-caret" />
         </summary>
         <div className="collapse-body">
-          <p style={{ opacity: 0.7, fontSize: 12.5, marginTop: 0, lineHeight: 1.5 }}>
-            Per-call timeout for each upstream attempt before the router moves on.
-          </p>
           {routerCfg && routerLimits ? (
-            <label style={{ display: "block", fontSize: 13 }}>
-              <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}>
-                <span>Per-call timeout</span>
-                <span className="mono" style={{ opacity: 0.8 }}>{Math.round(routerCfg.timeoutMs / 1000)}s</span>
-              </div>
-              <input
-                type="range"
-                min={routerLimits.timeoutMs.min}
-                max={routerLimits.timeoutMs.max}
-                step={1000}
-                value={routerCfg.timeoutMs}
-                disabled={routerBusy}
-                onChange={(e) => setRouterCfg({ ...routerCfg, timeoutMs: Number(e.target.value) })}
-                onMouseUp={(e) => saveRouterCfg({ timeoutMs: Number((e.target as HTMLInputElement).value) })}
-                onTouchEnd={(e) => saveRouterCfg({ timeoutMs: Number((e.target as HTMLInputElement).value) })}
-                style={{ width: "100%" }}
-              />
-            </label>
+            <div style={{ display: "grid", gap: 14 }}>
+              {cfgSlider("timeoutMs", "Per-call timeout", "Per-attempt upstream timeout before the router moves on.", (v) => `${Math.round(v / 1000)}s`, 1000)}
+              {cfgSlider("maxKeysPerModel", "Keys per model", "Keys tried per model on one call before failing over to the next model (0 = every key).", (v) => (v === 0 ? "all" : String(v)), 1)}
+              {cfgSlider("cooldownRateLimitMs", "Rate-limit cooldown", "How long a key/model sits out after a 429/413 before it's retried.", fmtMs, 60_000)}
+              {cfgSlider("cooldownClientErrorMs", "Client-error cooldown", "How long a key/model sits out after a non-retryable 4xx (bad model/auth).", fmtMs, 60_000)}
+            </div>
           ) : (
             <p style={{ fontSize: 12, opacity: 0.6, margin: 0 }}>Loading…</p>
           )}
@@ -320,6 +363,60 @@ export default function LLMKeys() {
           <RouterFeed />
         </div>
       </details>
+
+      {/* Model leaderboard — best→worst across every provider (the order the auto
+          rotation tries them). Includes models whose provider has no key yet, so
+          any model can be disabled here even before you add its key. */}
+      {leaderboard.length > 0 && (
+        <details className="collapse">
+          <summary>
+            Model leaderboard (best → worst)
+            <span className="col-sub">{leaderboard.length} models</span>
+            <span className="col-caret" />
+          </summary>
+          <div className="collapse-body">
+            <p style={{ opacity: 0.7, fontSize: 12, marginTop: 0, lineHeight: 1.5 }}>
+              The exact order the auto-rotation prefers models. Disable any you don&apos;t want in
+              rotation (across the app — voice, pipeline, mail). A model with no key for its
+              provider shows <code>no key</code> but can still be pre-disabled.
+            </p>
+            <ol style={{ margin: 0, padding: 0, listStyle: "none", display: "grid", gap: 4 }}>
+              {leaderboard.map((m, i) => {
+                const id = `${m.platform}/${m.model}`;
+                const title =
+                  `Rank ${m.rank} · ${m.platform} · ${m.totalTokens.toLocaleString()} tokens all-time` +
+                  (m.todayTokens ? `, ${m.todayTokens.toLocaleString()} today` : "") +
+                  (m.hasKey ? "" : " · no key for this provider yet") +
+                  (m.source === "fallback" ? " · built-in fallback chain" : "") +
+                  (m.cooledDown ? " · on cooldown" : "") +
+                  (m.enabled ? " · in auto rotation" : " · disabled");
+                return (
+                  <li key={id} title={title}
+                    style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12.5,
+                      padding: "5px 9px", borderRadius: 8, border: "1px solid var(--border)",
+                      background: "var(--a-dim)", opacity: m.enabled ? 1 : 0.4 }}>
+                    <span className="mono" style={{ opacity: 0.5, width: 22 }}>{i + 1}</span>
+                    <span style={{ opacity: 0.55, fontSize: 11, width: 74 }}>{m.platform}</span>
+                    <span style={{ flex: 1, wordBreak: "break-all" }}>{m.model}</span>
+                    {m.source === "fallback" && <span style={{ fontSize: 11, color: "var(--t2)" }}>fallback</span>}
+                    {!m.hasKey && <span style={{ fontSize: 11, color: "var(--u4c)" }}>no key</span>}
+                    {m.cooledDown && <span style={{ fontSize: 11, color: "var(--u4c)" }}>⏳</span>}
+                    <span style={{ fontVariantNumeric: "tabular-nums", opacity: 0.6, minWidth: 64, textAlign: "right" }}>
+                      {m.totalTokens ? `${fmtTok(m.totalTokens)} all` : "—"}
+                    </span>
+                    {!m.enabled && <span style={{ fontSize: 11, color: "var(--u4c)" }}>disabled</span>}
+                    <button type="button" onClick={() => setModelEnabled(m.platform, m.model, !m.enabled)}
+                      disabled={modelBusy === id} style={{ ...linkBtn, minWidth: 48, textAlign: "right" }}
+                      title={m.enabled ? "Disable in auto rotation" : "Enable in auto rotation"}>
+                      {modelBusy === id ? "..." : m.enabled ? "disable" : "enable"}
+                    </button>
+                  </li>
+                );
+              })}
+            </ol>
+          </div>
+        </details>
+      )}
 
       {loading ? (
         <p style={{ color: "var(--t2)" }}>Loading…</p>

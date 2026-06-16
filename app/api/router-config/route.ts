@@ -22,6 +22,7 @@ export async function POST(req: NextRequest) {
     timeoutMs: b?.timeoutMs,
     cooldownRateLimitMs: b?.cooldownRateLimitMs,
     cooldownClientErrorMs: b?.cooldownClientErrorMs,
+    maxKeysPerModel: b?.maxKeysPerModel,
   });
   return NextResponse.json({ config, limits: ROUTER_LIMITS });
 }

@@ -12,6 +12,8 @@ import { sendMessage, type Channel } from "@/lib/messaging";
 import { listContacts, upsertContact, deleteContact } from "@/lib/contacts";
 import { importGoogleContacts, createGoogleContact } from "@/lib/google-contacts";
 import { isTelegramUserConfigured, importTelegramContacts } from "@/lib/telegram-user";
+import { listAllOpenPrs, getRepoStatus, summarizePr, listConfiguredRepos } from "@/lib/github";
+import { runAll as runHealthChecks, getSelfHealth } from "@/lib/health";
 
 // JSON-schema tool definitions handed to the Groq LLM.
 export const toolDefs = [
@@ -820,6 +822,61 @@ export const toolDefs = [
       },
     },
   },
+  {
+    type: "function" as const,
+    function: {
+      name: "github_prs",
+      description:
+        "List open GitHub pull requests across the user's configured repos, with CI status. Use for 'any open PRs?', 'what pull requests are open', 'PR status'. Optionally filter to one repo.",
+      parameters: {
+        type: "object",
+        properties: {
+          repo: { type: ["string", "null"], description: "Optional 'owner/repo' to limit to one repository." },
+        },
+      },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
+      name: "github_status",
+      description:
+        "Get the CI / build status of a GitHub repository (its default branch's latest commit) plus its open-PR count. Use for 'is the build passing', 'CI status of owner/repo'.",
+      parameters: {
+        type: "object",
+        properties: {
+          repo: { type: "string", description: "'owner/repo' (required)." },
+        },
+        required: ["repo"],
+      },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
+      name: "github_pr_review",
+      description:
+        "Summarize or review a specific GitHub pull request using the rotating models. Use for 'summarize PR 42 in owner/repo', 'review pull request 7'. mode 'review' gives a code review; 'summary' gives a plain summary.",
+      parameters: {
+        type: "object",
+        properties: {
+          repo: { type: "string", description: "'owner/repo' (required)." },
+          number: { type: "number", description: "the PR number (required)." },
+          mode: { type: ["string", "null"], enum: ["summary", "review", null], description: "'summary' (default) or 'review'." },
+        },
+        required: ["repo", "number"],
+      },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
+      name: "health_status",
+      description:
+        "Run the project health checks and report which sites/endpoints are up or down (with latency), plus this app's own self-health (database + config). Use for 'is my site up', 'health status', 'is everything online'.",
+      parameters: { type: "object", properties: {} },
+    },
+  },
 ];
 
 // ── Coding-mode file tools (LOCAL ONLY) ─────────────────────────────────────
@@ -930,11 +987,11 @@ const CORE_TOOLS = new Set([
 // RULE block (not just the tools) only when relevant — keeping every request's
 // prompt small. The core task/event/note rules are always present (and form a
 // stable, cacheable prefix); only these domain blocks vary.
-export type GroupKey = "email" | "spotify" | "local" | "shell" | "search" | "message";
+export type GroupKey = "email" | "spotify" | "local" | "shell" | "search" | "message" | "github";
 
 // Every domain group. Used by the LOCAL "all tools" path: a local model has no
 // token budget to protect, so it gets the entire toolset + all rule blocks.
-export const ALL_GROUPS: GroupKey[] = ["email", "spotify", "local", "shell", "search", "message"];
+export const ALL_GROUPS: GroupKey[] = ["email", "spotify", "local", "shell", "search", "message", "github"];
 
 const TOOL_GROUPS: { key: GroupKey; tools: string[]; re: RegExp }[] = [
   {
@@ -975,6 +1032,12 @@ const TOOL_GROUPS: { key: GroupKey; tools: string[]; re: RegExp }[] = [
     // "text"/"tell"/"send" are intentionally here; mis-routes self-heal.
     tools: ["send_message", "add_contact", "list_contacts", "sync_contacts"],
     re: /\b(message|messages|whatsapp|telegram|dm|imessage|texting|contact|contacts|notify|sync|import)\b|\b(text|tell|send|msg|message|email|let)\b.{0,30}\b(mom|dad|him|her|them|to|that|know|saying)\b/i,
+  },
+  {
+    key: "github",
+    // PRs / repo CI status / PR review + project health/uptime checks.
+    tools: ["github_prs", "github_status", "github_pr_review", "health_status"],
+    re: /\b(github|pull request|pull requests|\bpr\b|\bprs\b|repo|repository|\bci\b|build status|merge|health|uptime|status check)\b|\bis\b.{0,20}\b(up|down|online|offline|healthy)\b/i,
   },
 ];
 
@@ -1971,6 +2034,51 @@ async function execTool(name: string, args: Args): Promise<unknown> {
         }
       }
       return out;
+    }
+    case "github_prs": {
+      const filter = (args.repo ?? "").trim().toLowerCase();
+      const { prs, errors } = await listAllOpenPrs();
+      const repos = await listConfiguredRepos();
+      if (!repos.length) return { error: "No repos configured — add one in the GitHub tab." };
+      const list = filter ? prs.filter((p) => p.repo.toLowerCase() === filter) : prs;
+      return {
+        count: list.length,
+        pulls: list.map((p) => ({
+          repo: p.repo, number: p.number, title: p.title, author: p.author,
+          branch: `${p.headRef} → ${p.baseRef}`, draft: p.draft, ci: p.status.state,
+        })),
+        ...(errors.length ? { errors } : {}),
+      };
+    }
+    case "github_status": {
+      const [owner, repo] = (args.repo ?? "").trim().split("/");
+      if (!owner || !repo) return { error: "give the repo as 'owner/repo'" };
+      const r = await getRepoStatus(owner, repo);
+      if (!r.ok) return { error: r.error };
+      return {
+        repo: r.data.repo, defaultBranch: r.data.defaultBranch, ci: r.data.status.state,
+        openPRs: r.data.openPrs,
+        checks: r.data.status.checks.map((c) => `${c.name}: ${c.conclusion}`),
+      };
+    }
+    case "github_pr_review": {
+      const [owner, repo] = (args.repo ?? "").trim().split("/");
+      const number = Number(args.number);
+      if (!owner || !repo || !Number.isInteger(number)) return { error: "give 'owner/repo' and a PR number" };
+      const mode = args.mode === "review" ? "review" : "summary";
+      const r = await summarizePr(owner, repo, number, mode);
+      if (!r.ok) return { error: r.error };
+      return { repo: `${owner}/${repo}`, number, mode, title: r.data.title, text: r.data.text };
+    }
+    case "health_status": {
+      const [results, self] = await Promise.all([runHealthChecks(), getSelfHealth()]);
+      return {
+        app: { ok: self.ok, db: self.db },
+        checks: results.map((c) => ({
+          name: c.name, up: c.ok, status: c.status, latencyMs: c.latencyMs, ...(c.error ? { error: c.error } : {}),
+        })),
+        summary: `${results.filter((c) => c.ok).length}/${results.length} checks up; app ${self.ok ? "healthy" : "unhealthy"}.`,
+      };
     }
     default:
       return { error: `unknown tool ${name}` };
