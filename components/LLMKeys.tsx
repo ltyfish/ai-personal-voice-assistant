@@ -473,6 +473,20 @@ export default function LLMKeys() {
                 spends tokens (today's usage). All-time used shown alongside. */}
             {(modelsByPlatform[p]?.length ?? 0) > 0 && (
               <div style={{ marginTop: 10, paddingLeft: 2 }}>
+                {/* Section subheader — shows key count so the budget-multiplier is obvious. */}
+                <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6, padding: "0 6px" }}>
+                  <span style={{ fontSize: 11, fontWeight: 600, letterSpacing: "0.06em", textTransform: "uppercase", opacity: 0.45 }}>
+                    Usage per model
+                  </span>
+                  {(() => {
+                    const nk = modelsByPlatform[p][0]?.keyCount ?? 0;
+                    return nk > 1 ? (
+                      <span style={{ fontSize: 11, opacity: 0.5 }}>
+                        ({nk} keys · budgets ×{nk})
+                      </span>
+                    ) : null;
+                  })()}
+                </div>
                 {modelsByPlatform[p].map((m) => {
                   const remaining = m.dayCap ? Math.max(0, m.dayCap - m.todayTokens) : 0;
                   const pct = m.dayCap ? Math.min(100, (m.todayTokens / m.dayCap) * 100) : 0;
