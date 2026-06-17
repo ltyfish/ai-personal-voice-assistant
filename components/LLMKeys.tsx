@@ -446,7 +446,7 @@ export default function LLMKeys() {
                   opacity: k.enabled ? 1 : 0.45,
                 }}
               >
-                <code style={{ minWidth: 130, fontFamily: "var(--font-mono)" }}>{k.maskedKey}</code>
+                <code style={{ flex: "1 1 0", minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontFamily: "var(--font-mono)" }}>{k.maskedKey}</code>
                 {k.label && <span style={{ opacity: 0.6, fontSize: 12 }}>{k.label}</span>}
                 {k.baseUrl && (
                   <span style={{ opacity: 0.45, fontSize: 11 }} title={k.baseUrl}>
@@ -457,7 +457,7 @@ export default function LLMKeys() {
                 {k.failCount > 0 && !k.cooledDown && (
                   <span style={{ fontSize: 11, opacity: 0.5 }}>{k.failCount} fails</span>
                 )}
-                <span style={{ marginLeft: "auto", display: "flex", gap: 12 }}>
+                <span style={{ marginLeft: "auto", flexShrink: 0, display: "flex", gap: 12 }}>
                   <button onClick={() => toggle(k)} style={linkBtn}>
                     {k.enabled ? "disable" : "enable"}
                   </button>
@@ -504,8 +504,8 @@ export default function LLMKeys() {
                   return (
                     <div key={m.model} title={title}
                       style={{ display: "flex", alignItems: "center", gap: 10, padding: "3px 6px", fontSize: 12.5,
-                        opacity: m.enabled ? (m.totalTokens ? 1 : 0.7) : 0.38 }}>
-                      <span style={{ flex: 1, wordBreak: "break-all" }}>{m.model}</span>
+                        opacity: m.enabled ? (m.totalTokens ? 1 : 0.7) : 0.38, flexWrap: "wrap" }}>
+                      <span style={{ flex: "1 1 0", minWidth: "4em", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{m.model}</span>
                       {m.source === "fallback" && <span style={{ fontSize: 11, color: "var(--t2)" }}>fallback</span>}
                       {m.cooledDown && (
                         <span style={{ fontSize: 11, color: "var(--u4c)" }}
@@ -521,7 +521,7 @@ export default function LLMKeys() {
                             background: pct >= 90 ? "var(--u5c)" : pct >= 60 ? "var(--u4c)" : "var(--t1)" }} />
                         </div>
                       ) : null}
-                      <span style={{ fontVariantNumeric: "tabular-nums", minWidth: 150, textAlign: "right", opacity: 0.9 }}>
+                      <span style={{ fontVariantNumeric: "tabular-nums", flexShrink: 0, textAlign: "right", opacity: 0.9 }}>
                         {m.dayCap ? (
                           <>
                             <span style={{ color: "var(--t1)" }}>{fmtTok(remaining)}</span>

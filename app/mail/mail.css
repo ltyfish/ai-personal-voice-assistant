@@ -1266,17 +1266,17 @@
   /* --card (#0e0e11) is almost the page bg, so the toast read as transparent.
      Lift it onto --card2 with a clear border + blur + drop shadow so it stands
      off the content. */
-  background:var(--card2); border:1px solid var(--border2); border-radius:16px;
+  background:var(--card2,#151519); border:1px solid var(--border2,rgba(255,255,255,.16)); border-radius:16px;
   backdrop-filter:blur(14px); -webkit-backdrop-filter:blur(14px);
-  padding:.6rem .7rem .6rem 1rem; font-size:.82rem; line-height:1.4; color:var(--t1);
-  box-shadow:0 0 22px var(--a-dim), 0 12px 34px rgba(0,0,0,.6);
+  padding:.6rem .7rem .6rem 1rem; font-size:.82rem; line-height:1.4; color:var(--t1,#f4f4f6);
+  box-shadow:0 0 22px var(--a-dim,rgba(255,255,255,.08)), 0 12px 34px rgba(0,0,0,.6);
 }
 .reminders-cta button {
-  background:var(--a-dim); border:1px solid var(--border2); color:var(--a);
+  background:var(--a-dim,rgba(255,255,255,.08)); border:1px solid var(--border2,rgba(255,255,255,.16)); color:var(--a,#f4f4f6);
   border-radius:99px; padding:.35rem 1rem; cursor:pointer; font-weight:600;
   flex-shrink:0; transition:box-shadow .15s;
 }
-.reminders-cta button:hover { box-shadow:0 0 14px var(--a-glow); }
+.reminders-cta button:hover { box-shadow:0 0 14px var(--a-glow,rgba(255,255,255,.18)); }
 /* Phones: full-width banner with comfortable text instead of a clipped pill. */
 @media (max-width:560px) {
   .reminders-cta {
@@ -1921,6 +1921,18 @@
   .jarvis-center { position:relative; }
 }
 
+/* Mobile override — must follow the base .jarvis-center .jarvis-orb rule above
+   so these declarations win the cascade (later = higher priority). */
+@media (max-width:760px) {
+  .jarvis-center .jarvis-orb {
+    width:100% !important; min-height:calc(38vmin + 140px) !important;
+    min-width:0 !important; aspect-ratio:1 !important;
+  }
+  /* The base .jarvis-type has max-width:780px which overrides the 760px breakpoint
+     rule defined earlier in the file. Re-apply it here after the base. */
+  .jarvis-type { max-width:100%; }
+}
+
 /* ═══════════════════════════════════════════════
    BOOT SEQUENCE — power-on overlay (once per session)
    ═══════════════════════════════════════════════ */
@@ -2391,6 +2403,21 @@ input[type="range"].deck-range {
 .deck-dock:hover .deck-dock-track { animation-play-state:paused; }
 @keyframes dock-flow { from { transform:translateX(0); } to { transform:translateX(-50%); } }
 @media (prefers-reduced-motion: reduce) { .deck-dock-track { animation:none; } }
+
+/* Mobile: these rules must appear AFTER the base deck-dock rules above so they
+   win the cascade (same specificity — last definition wins). The block at the
+   top of the file (line ~860) is shadowed by the base rules and has no effect. */
+@media (max-width:760px) {
+  .deck-dock {
+    max-width:100%; overflow:hidden;
+    -webkit-mask:none; mask:none;
+  }
+  .deck-dock-track {
+    animation:none; width:100%; flex-wrap:wrap; justify-content:center; gap:.5rem;
+  }
+  .deck-dock-track > button[aria-hidden="true"] { display:none; }
+  .deck-chip { margin-right:0; }
+}
 
 .deck-chip {
   display:inline-flex; align-items:center; gap:.5rem; margin-right:.6rem; flex-shrink:0;
