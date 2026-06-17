@@ -9,6 +9,29 @@ type Task = {
   dueDate: string | null;
   done: boolean;
 };
+type Subtask = {
+  id: string;
+  title: string;
+  dueDate: string | null;
+  done: boolean;
+};
+type Note = {
+  id: string;
+  title: string | null;
+  body: string;
+  date: string | null;
+};
+// An improvement's scheduled time: legacy bare ISO start string, or {start,end?}.
+type ImpTime = string | { start: string; end?: string };
+type Project = {
+  id: string;
+  title: string;
+  improvementTimes?: Record<string, ImpTime>;
+  done?: boolean;
+};
+
+const impStartIso = (v: ImpTime | undefined): string =>
+  typeof v === "string" ? v : v?.start ?? "";
 
 const LEAD_MS = 10 * 60 * 1000; // heads-up this far before something is due
 const GRACE_MS = 5 * 60 * 1000; // still alert if we open the app shortly after
@@ -69,9 +92,15 @@ function speak(text: string) {
 export default function Reminders({
   events,
   tasks,
+  subtasks = [],
+  notes = [],
+  projects = [],
 }: {
   events: BaseEvent[];
   tasks: Task[];
+  subtasks?: Subtask[];
+  notes?: Note[];
+  projects?: Project[];
 }) {
   const [perm, setPerm] = useState<NotificationPermission>("default");
   const firedRef = useRef<Set<string>>(new Set());
@@ -118,13 +147,46 @@ export default function Reminders({
         }
       }
 
-      for (const t of tasks) {
-        if (!t.dueDate || t.done) continue;
-        const diff = new Date(t.dueDate).getTime() - now;
+      // Anything with a single scheduled timestamp (tasks, subtasks, notes,
+      // project improvement times) shares one lead/now reminder shape.
+      const remindAt = (
+        whenIso: string | null | undefined,
+        keyBase: string,
+        leadTitle: string,
+        nowTitle: string
+      ) => {
+        if (!whenIso) return;
+        const when = new Date(whenIso).getTime();
+        if (Number.isNaN(when)) return;
+        const diff = when - now;
         if (diff > 0 && diff <= LEAD_MS) {
-          fire(`task-lead:${t.id}:${t.dueDate}`, `Task due soon: ${t.title}`, "Due in a few minutes");
+          const mins = Math.max(1, Math.round(diff / 60000));
+          fire(`${keyBase}:lead:${whenIso}`, leadTitle, `In ${mins} min`);
         } else if (diff <= 0 && diff > -GRACE_MS) {
-          fire(`task-due:${t.id}:${t.dueDate}`, `Task due: ${t.title}`, "Due now");
+          fire(`${keyBase}:now:${whenIso}`, nowTitle, "Now");
+        }
+      };
+
+      for (const t of tasks) {
+        if (t.done) continue;
+        remindAt(t.dueDate, `task:${t.id}`, `Task due soon: ${t.title}`, `Task due: ${t.title}`);
+      }
+
+      for (const s of subtasks) {
+        if (s.done) continue;
+        remindAt(s.dueDate, `sub:${s.id}`, `Subtask due soon: ${s.title}`, `Subtask due: ${s.title}`);
+      }
+
+      for (const n of notes) {
+        const label = (n.title || n.body || "Note").slice(0, 60);
+        remindAt(n.date, `note:${n.id}`, `Note soon: ${label}`, `Note: ${label}`);
+      }
+
+      for (const p of projects) {
+        if (p.done) continue;
+        for (const [imp, raw] of Object.entries(p.improvementTimes ?? {})) {
+          const label = `${p.title}: ${imp}`.slice(0, 70);
+          remindAt(impStartIso(raw), `imp:${p.id}:${imp}`, `Upcoming — ${label}`, `Now — ${label}`);
         }
       }
     };
@@ -132,7 +194,7 @@ export default function Reminders({
     check();
     const id = setInterval(check, 30 * 1000);
     return () => clearInterval(id);
-  }, [perm, events, tasks]);
+  }, [perm, events, tasks, subtasks, notes, projects]);
 
   if (perm === "granted") return null;
 

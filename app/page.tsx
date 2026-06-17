@@ -135,7 +135,13 @@ export default function Home() {
       <BootSequence />
       {/* Always mounted (not tied to the Calendar tab) so reminders fire no
           matter which tab is open. */}
-      <Reminders events={openEvents} tasks={openTasks} />
+      <Reminders
+        events={openEvents}
+        tasks={openTasks}
+        subtasks={subtasks}
+        notes={notes}
+        projects={projects}
+      />
       <MailApp
         assistant={assistant}
         tasks={tasksTab}

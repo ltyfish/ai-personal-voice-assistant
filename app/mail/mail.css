@@ -1262,16 +1262,28 @@
 .reminders-cta {
   position:fixed; top:.6rem; left:50%; transform:translateX(-50%);
   z-index:60; display:flex; align-items:center; gap:.75rem;
-  background:var(--card); border:1px solid var(--border2); border-radius:99px;
-  padding:.45rem .55rem .45rem 1rem; font-size:.82rem; color:var(--t1);
-  box-shadow:0 0 22px var(--a-dim), 0 6px 18px rgba(0,0,0,.4);
+  flex-wrap:wrap; justify-content:center; max-width:min(92vw, 460px);
+  /* --card (#0e0e11) is almost the page bg, so the toast read as transparent.
+     Lift it onto --card2 with a clear border + blur + drop shadow so it stands
+     off the content. */
+  background:var(--card2); border:1px solid var(--border2); border-radius:16px;
+  backdrop-filter:blur(14px); -webkit-backdrop-filter:blur(14px);
+  padding:.6rem .7rem .6rem 1rem; font-size:.82rem; line-height:1.4; color:var(--t1);
+  box-shadow:0 0 22px var(--a-dim), 0 12px 34px rgba(0,0,0,.6);
 }
 .reminders-cta button {
   background:var(--a-dim); border:1px solid var(--border2); color:var(--a);
-  border-radius:99px; padding:.3rem .9rem; cursor:pointer; font-weight:600;
-  transition:box-shadow .15s;
+  border-radius:99px; padding:.35rem 1rem; cursor:pointer; font-weight:600;
+  flex-shrink:0; transition:box-shadow .15s;
 }
 .reminders-cta button:hover { box-shadow:0 0 14px var(--a-glow); }
+/* Phones: full-width banner with comfortable text instead of a clipped pill. */
+@media (max-width:560px) {
+  .reminders-cta {
+    left:.75rem; right:.75rem; transform:none; max-width:none;
+    font-size:.78rem; padding:.6rem .75rem;
+  }
+}
 .jarvis-line { max-width:540px; font-size:.95rem; color:var(--t2); }
 .jarvis-reply { max-width:540px; display:flex; flex-direction:column; align-items:center; gap:.35rem; }
 .jarvis-reply p { font-size:1.08rem; color:var(--t1); line-height:1.55; }
