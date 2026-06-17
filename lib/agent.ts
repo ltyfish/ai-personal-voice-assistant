@@ -1433,11 +1433,6 @@ export async function runAgent(
       }
 
       // Gate: after each tool batch, decide cheaply whether to speak or chain.
-      // Zero-cost first: writes (create/update/delete) are directly speakable.
-      {
-        const direct = directReply(actions);
-        if (direct) { finalReply = direct; break; }
-      }
       // Cheap gate call (no tool schema — just results + user text, ~1k tokens).
       // The model either speaks the reply or outputs CONTINUE to chain another round.
       try {
