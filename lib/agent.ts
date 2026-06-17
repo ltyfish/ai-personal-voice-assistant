@@ -29,64 +29,78 @@ async function getMemoryBlock(): Promise<string> {
   }
 }
 
+// Which snapshot sections a set of tool names actually needs. Scoping the
+// snapshot to only the relevant tables saves tokens — a notes-only session
+// never ships task/event/project rows.
+type SnapshotSection = "tasks" | "events" | "notes" | "projects";
+
+const TOOL_SECTION_MAP: Partial<Record<string, SnapshotSection[]>> = {
+  create_task: ["tasks"],    update_task: ["tasks"],
+  delete_task: ["tasks"],    list_tasks: ["tasks"],
+  add_subtask: ["tasks"],    update_subtask: ["tasks"],
+  delete_subtask: ["tasks"], list_subtasks: ["tasks"],
+  create_event: ["events"],  update_event: ["events"],
+  delete_event: ["events"],  list_events: ["events"],
+  create_note: ["notes"],    update_note: ["notes"],
+  delete_note: ["notes"],    search_notes: ["notes"],
+  create_project: ["projects"], update_project: ["projects"],
+  delete_project: ["projects"], list_projects: ["projects"],
+  project_time: ["projects"],
+  // Bulk ops span types — include all types they act on.
+  complete_all: ["tasks", "events", "projects"],
+  delete_all:   ["tasks", "events", "notes", "projects"],
+};
+
+function snapshotSectionsFromTools(toolNames: string[]): Set<SnapshotSection> | null {
+  const out = new Set<SnapshotSection>();
+  for (const name of toolNames) for (const s of TOOL_SECTION_MAP[name] ?? []) out.add(s);
+  return out.size ? out : null;
+}
+
 // Compact snapshot of current data so the model knows what actually exists
 // (and whether a name like "meeting" is a task or an event). Each line carries
 // the item's short ref (t5/e2/n3) so the model can target it exactly.
-async function buildSnapshot(includeHistory = true): Promise<string> {
+// Pass `sections` to only include the tables the enabled tools actually need.
+async function buildSnapshot(includeHistory = true, sections?: Set<SnapshotSection> | null): Promise<string> {
+  const all = !sections || sections.size === 0;
+  const showTasks    = all || sections!.has("tasks");
+  const showEvents   = all || sections!.has("events");
+  const showNotes    = all || sections!.has("notes");
+  const showProjects = all || sections!.has("projects");
+
+  type TaskRow   = { seq: number; title: string; dueDate: Date | null };
+  type EventRow  = { seq: number; title: string; startTime: Date; recurrence: string; projectId: string | null };
+  type NoteRow   = { seq: number; title: string | null; body: string };
+  type ProjRow   = { id: string; seq: number; title: string; improvements: string[]; done: boolean };
+  type DoneRow   = { seq: number; title: string };
+
+  const none = <T>() => Promise.resolve([] as T[]);
+
   const [openTasks, openEvents, recentNotes, allProjects, doneTasks, doneEvents] =
     await Promise.all([
-      db
-        .select({ seq: tasks.seq, title: tasks.title, dueDate: tasks.dueDate })
-        .from(tasks)
-        .where(eq(tasks.done, false))
-        .orderBy(desc(tasks.createdAt))
-        .limit(12),
-      db
-        .select({
-          seq: events.seq,
-          title: events.title,
-          startTime: events.startTime,
-          recurrence: events.recurrence,
-          projectId: events.projectId,
-        })
-        .from(events)
-        .where(eq(events.done, false))
-        .orderBy(desc(events.createdAt))
-        .limit(12),
-      db
-        .select({ seq: notes.seq, title: notes.title, body: notes.body })
-        .from(notes)
-        .orderBy(desc(notes.createdAt))
-        .limit(10),
-      db
-        .select({
-          id: projects.id,
-          seq: projects.seq,
-          title: projects.title,
-          improvements: projects.improvements,
-          done: projects.done,
-        })
-        .from(projects)
-        .orderBy(desc(projects.createdAt))
-        .limit(10),
-      // History is only needed for undo/restore/delete-from-history — skip the
-      // two extra queries (and their tokens) otherwise.
-      includeHistory
-        ? db
-            .select({ seq: tasks.seq, title: tasks.title })
-            .from(tasks)
-            .where(eq(tasks.done, true))
-            .orderBy(desc(tasks.createdAt))
-            .limit(8)
-        : Promise.resolve([] as { seq: number; title: string }[]),
-      includeHistory
-        ? db
-            .select({ seq: events.seq, title: events.title })
-            .from(events)
-            .where(eq(events.done, true))
-            .orderBy(desc(events.createdAt))
-            .limit(8)
-        : Promise.resolve([] as { seq: number; title: string }[]),
+      showTasks
+        ? db.select({ seq: tasks.seq, title: tasks.title, dueDate: tasks.dueDate })
+            .from(tasks).where(eq(tasks.done, false)).orderBy(desc(tasks.createdAt)).limit(12)
+        : none<TaskRow>(),
+      showEvents
+        ? db.select({ seq: events.seq, title: events.title, startTime: events.startTime, recurrence: events.recurrence, projectId: events.projectId })
+            .from(events).where(eq(events.done, false)).orderBy(desc(events.createdAt)).limit(12)
+        : none<EventRow>(),
+      showNotes
+        ? db.select({ seq: notes.seq, title: notes.title, body: notes.body })
+            .from(notes).orderBy(desc(notes.createdAt)).limit(10)
+        : none<NoteRow>(),
+      showProjects
+        ? db.select({ id: projects.id, seq: projects.seq, title: projects.title, improvements: projects.improvements, done: projects.done })
+            .from(projects).orderBy(desc(projects.createdAt)).limit(10)
+        : none<ProjRow>(),
+      // History: only needed for undo/restore/delete-from-history.
+      includeHistory && showTasks
+        ? db.select({ seq: tasks.seq, title: tasks.title }).from(tasks).where(eq(tasks.done, true)).orderBy(desc(tasks.createdAt)).limit(8)
+        : none<DoneRow>(),
+      includeHistory && showEvents
+        ? db.select({ seq: events.seq, title: events.title }).from(events).where(eq(events.done, true)).orderBy(desc(events.createdAt)).limit(8)
+        : none<DoneRow>(),
     ]);
 
   const fmt = (d: Date | null) =>
@@ -98,67 +112,80 @@ async function buildSnapshot(includeHistory = true): Promise<string> {
         }).format(d)
       : "no date";
 
-  const taskLines = openTasks.length
-    ? openTasks
-        .map((t) => `  ${refOf("task", t.seq)}: "${t.title}" (due ${fmt(t.dueDate)})`)
-        .join("\n")
-    : "  (none)";
-  const projectSeqById = new Map(allProjects.map((p) => [p.id, p.seq]));
-  const eventLines = openEvents.length
-    ? openEvents
-        .map((e) => {
-          const projSeq = e.projectId ? projectSeqById.get(e.projectId) : undefined;
-          const projTag = projSeq ? `, time for ${refOf("project", projSeq)}` : "";
-          return `  ${refOf("event", e.seq)}: "${e.title}" (${fmt(e.startTime)}${
-            e.recurrence !== "none" ? `, repeats ${e.recurrence}` : ""
-          }${projTag})`;
-        })
-        .join("\n")
-    : "  (none)";
-  const noteLines = recentNotes.length
-    ? recentNotes
-        .map((n) => {
-          const text = (n.title ? `${n.title}: ` : "") + (n.body ?? "");
-          const trimmed = text.length > 40 ? `${text.slice(0, 40)}…` : text;
-          return `  ${refOf("note", n.seq)}: "${trimmed}"`;
-        })
-        .join("\n")
-    : "  (none)";
-  const openProjects = allProjects.filter((p) => !p.done);
-  const projectLines = openProjects.length
-    ? openProjects
-        .map((p) => {
-          const imps = p.improvements ?? [];
-          // Keep every improvement's NUMBER (so edit/remove-by-number still works)
-          // but cap each one's text — the full text comes back via list_projects.
-          const list = imps.length
-            ? imps
-                .map((t, i) => {
+  // Build the intro + only the active sections.
+  const parts: string[] = [
+    "\nThe user's CURRENT data. Each item has a ref (\"Task 5\", \"Event 2\", \"Note 3\"). To update/delete/undo an item, pass its ref — do NOT guess.",
+  ];
+
+  if (showTasks) {
+    const lines = openTasks.length
+      ? openTasks.map((t) => `  ${refOf("task", t.seq)}: "${t.title}" (due ${fmt(t.dueDate)})`).join("\n")
+      : "  (none)";
+    parts.push(`OPEN TASKS:\n${lines}`);
+  }
+
+  if (showEvents) {
+    // Project-event tags only make sense when the projects section is also shown.
+    const projectSeqById = showProjects
+      ? new Map(allProjects.map((p) => [p.id, p.seq]))
+      : new Map<string, number>();
+    const lines = openEvents.length
+      ? openEvents
+          .map((e) => {
+            const projSeq = e.projectId ? projectSeqById.get(e.projectId) : undefined;
+            const projTag = projSeq ? `, time for ${refOf("project", projSeq)}` : "";
+            return `  ${refOf("event", e.seq)}: "${e.title}" (${fmt(e.startTime)}${
+              e.recurrence !== "none" ? `, repeats ${e.recurrence}` : ""
+            }${projTag})`;
+          })
+          .join("\n")
+      : "  (none)";
+    parts.push(`EVENTS:\n${lines}`);
+  }
+
+  if (showNotes) {
+    const lines = recentNotes.length
+      ? recentNotes
+          .map((n) => {
+            const text = (n.title ? `${n.title}: ` : "") + (n.body ?? "");
+            const trimmed = text.length > 40 ? `${text.slice(0, 40)}…` : text;
+            return `  ${refOf("note", n.seq)}: "${trimmed}"`;
+          })
+          .join("\n")
+      : "  (none)";
+    parts.push(`NOTES:\n${lines}`);
+  }
+
+  if (showProjects) {
+    const openProjects = allProjects.filter((p) => !p.done);
+    const lines = openProjects.length
+      ? openProjects
+          .map((p) => {
+            const imps = p.improvements ?? [];
+            const list = imps.length
+              ? imps.map((t, i) => {
                   const s = t.length > 50 ? `${t.slice(0, 50)}…` : t;
                   return `      ${i + 1}. ${s}`;
-                })
-                .join("\n")
-            : "      (no improvements yet)";
-          return `  ${refOf("project", p.seq)}: "${p.title}"\n${list}`;
-        })
-        .join("\n")
-    : "  (none)";
-  const historyLines = [
-    ...doneTasks.map((t) => `  ${refOf("task", t.seq)}: "${t.title}"`),
-    ...doneEvents.map((e) => `  ${refOf("event", e.seq)}: "${e.title}"`),
-    ...(includeHistory
-      ? allProjects
-          .filter((p) => p.done)
-          .map((p) => `  ${refOf("project", p.seq)}: "${p.title}"`)
-      : []),
-  ];
-  // Omit the HISTORY section entirely when not requested (saves tokens).
-  const historySection =
-    includeHistory && historyLines.length
-      ? `\nHISTORY (already completed; can be undone or deleted):\n${historyLines.join("\n")}`
-      : "";
+                }).join("\n")
+              : "      (no improvements yet)";
+            return `  ${refOf("project", p.seq)}: "${p.title}"\n${list}`;
+          })
+          .join("\n")
+      : "  (none)";
+    parts.push(`PROJECTS (each lists its numbered improvements):\n${lines}`);
+  }
 
-  return `\nThe user's CURRENT data. Each item has a ref ("Task 5", "Event 2", "Note 3"). To update/delete/undo an item, pass its ref — do NOT guess. A name may be a TASK or an EVENT; the ref word tells you which.\nOPEN TASKS:\n${taskLines}\nEVENTS:\n${eventLines}\nNOTES:\n${noteLines}\nPROJECTS (each lists its numbered improvements):\n${projectLines}${historySection}\n`;
+  if (includeHistory) {
+    const historyLines = [
+      ...(showTasks    ? doneTasks.map((t) => `  ${refOf("task", t.seq)}: "${t.title}"`) : []),
+      ...(showEvents   ? doneEvents.map((e) => `  ${refOf("event", e.seq)}: "${e.title}"`) : []),
+      ...(showProjects ? allProjects.filter((p) => p.done).map((p) => `  ${refOf("project", p.seq)}: "${p.title}"`) : []),
+    ];
+    if (historyLines.length)
+      parts.push(`HISTORY (already completed; can be undone or deleted):\n${historyLines.join("\n")}`);
+  }
+
+  return parts.join("\n") + "\n";
 }
 
 // Try each model in turn. A 429 is one of two very different things:
@@ -525,6 +552,10 @@ async function systemPrompt(opts: {
    *  turns inject it here; LOCAL turns already get it via memory.md in the prep
    *  route, so it's only applied when !localBrowser to avoid double-injection. */
   memory?: string;
+  /** The exact tool names being sent this turn — used to scope the data snapshot
+   *  to only the tables those tools actually need (saves tokens when e.g. only
+   *  notes tools are enabled). Omit to include all four sections. */
+  toolNames?: string[];
 }) {
   const { groups, text } = opts;
   const now = new Date();
@@ -566,7 +597,8 @@ async function systemPrompt(opts: {
       ? opts.snapshotOverride
       : needsSnapshot(text, groups);
   const wantHistory = /\b(undo|restore|reopen|history|completed|delete)\b/i.test(text);
-  const snapshot = wantSnapshot ? await buildSnapshot(wantHistory) : "";
+  const sections = opts.toolNames ? snapshotSectionsFromTools(opts.toolNames) : null;
+  const snapshot = wantSnapshot ? await buildSnapshot(wantHistory, sections) : "";
 
   // Static prefix first (cacheable), volatile context last. CLOUD turns prepend the
   // generic CORE_PROMPT. LOCAL turns already get identity + the same GENERIC_RULES
@@ -1114,6 +1146,8 @@ async function planTurn(
       // per-route decision (undefined => auto).
       snapshotOverride: useSnapshot ? snapshotOverride : false,
       slim,
+      // Scope the snapshot to only the tables the active tools actually need.
+      toolNames: tools.map((t: any) => t.function.name),
     });
     systemContent = sp.system;
     contextContent = sp.context;
