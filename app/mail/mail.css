@@ -833,11 +833,34 @@
   .nav-more-menu { max-height:72vh; overflow-y:auto; min-width:170px; }
   .nav-more-item { padding:.6rem .85rem; font-size:.82rem; }
   .layout { min-height:calc(100dvh - 48px); }
-  /* Orb stage: leave room for the typed-command box + deck below it, and never
-     overflow the viewport width. */
-  .jarvis-orb { width:min(64vmin, 360px); }
-  .jarvis-center { gap:1rem; min-height:calc(100dvh - 48px - 2.5rem); }
-  .jarvis-stage { min-height:calc(100dvh - 48px - 2.5rem); }
+  /* Orb stage on phones. The desktop layout centres a shrink-to-fit column that
+     blows out to ~780px (the typed box's max-width) and gets clipped by the
+     viewport. Pin the column to the screen width and add a gutter so nothing is
+     cut off horizontally. */
+  .jarvis-stage { min-height:calc(100dvh - 48px - 2.5rem); padding-top:.5rem; }
+  .jarvis-center {
+    gap:1rem; width:100%; max-width:100%; box-sizing:border-box;
+    padding:1.25rem 1rem 2rem; min-height:calc(100dvh - 48px - 2.5rem);
+  }
+  /* Shrink the reserved orb footprint (desktop reserves 40vmin+300px, which
+     pushes the typed box + chips below the fold). Must use !important to beat
+     the base `.jarvis-center .jarvis-orb` rule's sizing. */
+  .jarvis-center .jarvis-orb {
+    min-height:calc(38vmin + 140px) !important;
+    min-width:0 !important; width:100% !important;
+  }
+  .jarvis-title { font-size:clamp(1.5rem, 8vw, 2.4rem); }
+  .jarvis-type { margin-top:1.2rem; max-width:100%; }
+  .jarvis-type-input { padding:1rem 1.3rem; font-size:1rem; }
+  /* A sliding marquee of control chips is hard to tap on a phone: stop the
+     animation, drop the duplicate (marquee) set, and let the real chips wrap so
+     every one is reachable. */
+  .deck-dock { max-width:100%; -webkit-mask:none; mask:none; overflow:visible; }
+  .deck-dock-track {
+    animation:none; width:100%; flex-wrap:wrap; justify-content:center; gap:.5rem;
+  }
+  .deck-dock-track > button[aria-hidden="true"] { display:none; }
+  .deck-chip { margin-right:0; }
 }
 
 @media (max-width:640px) {
