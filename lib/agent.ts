@@ -1169,10 +1169,11 @@ async function planTurn(
     clarify,
     triggerKeyword,
     multi,
-    // Do not reload the full enabled tool schema after a tool batch just to
-    // speak a summary. The summary pass below sends [] tools and only the tool
-    // results. Local keeps its own client loop.
-    multiRound: false,
+    // Let the model decide whether it needs more tool rounds: if it emits tool
+    // calls after seeing the first batch's results, the loop continues; if it
+    // speaks a reply, the loop exits and Pass 2 is skipped entirely. The 5-round
+    // cap (MAX_TOOL_ROUNDS) prevents runaway chains.
+    multiRound: true,
     slim,
     presetCalls,
     onlyPreset,
@@ -1428,10 +1429,8 @@ export async function runAgent(
         });
       }
 
-      // Smart cloud turns keep looping so the model can chain a dependent next
-      // call after seeing a result; when the model has no more tool calls the
-      // loop exits above with its spoken reply. A non-looping turn stops after the
-      // first batch and lets the cheap summary pass phrase the reply.
+      // The model decides: if it emits more tool calls after seeing the results it
+      // gets another round; if it speaks a final reply the loop exited above.
       if (!multiRound) break;
     }
   }
