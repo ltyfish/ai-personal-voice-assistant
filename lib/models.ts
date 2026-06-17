@@ -12,6 +12,11 @@ export interface ModelDef {
   id: string;
   provider: Provider;
   label: string;
+  /** Exact router id ("<platform>/<model>") for synthetic chain entries built
+   *  from the router's auto catalog (which spans every provider, not just the
+   *  three in MODELS). When set, the router uses this verbatim instead of
+   *  deriving "<provider>/<id>". Registry models leave it undefined. */
+  routerId?: string;
   /** per-day token cap (Groq free tier), for the usage UI; optional */
   tpd?: number;
   /** per-day request cap (Gemini free tier), for the usage UI; optional */

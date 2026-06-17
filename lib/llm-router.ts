@@ -574,6 +574,15 @@ async function fallbackAutoChain(): Promise<string[]> {
   return await filterAvailableModels(FALLBACK_AUTO_CHAIN.filter((id) => !disabled.has(id)));
 }
 
+// Public accessor for the auto rotation chain (router "<platform>/<model>" ids,
+// strongest-first, already filtered to enabled+available+not-disabled). The
+// cloud voice agent uses this to rotate across EVERY configured provider — the
+// same chain local voice gets via model:"auto" — instead of the static 8-model
+// registry list.
+export async function getAutoChain(): Promise<string[]> {
+  return autoChain();
+}
+
 async function autoChain(): Promise<string[]> {
   try {
     const platforms = await enabledPlatforms();

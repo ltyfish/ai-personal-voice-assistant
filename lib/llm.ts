@@ -41,6 +41,9 @@ function makeError(status: number, message: string, headers?: Record<string, str
 // registry's "gemini" provider is Google's OpenAI-compat endpoint, which the
 // router registers under the "google" platform.
 function routerModelId(model: ModelDef): string {
+  // Synthetic auto-chain entries carry their exact router id (which can contain
+  // extra "/"s, e.g. "groq/openai/gpt-oss-120b") — use it verbatim.
+  if (model.routerId) return model.routerId;
   const platform = model.provider === "gemini" ? "google" : model.provider;
   return `${platform}/${model.id}`;
 }

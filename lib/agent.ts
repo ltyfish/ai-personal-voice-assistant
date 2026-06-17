@@ -11,6 +11,7 @@ import { recordRateLimit } from "@/lib/mail/blobs";
 import { db, tasks, events, notes, projects } from "@/db";
 import { refOf } from "./refs";
 import { createCompletion, createCompletionStream } from "./llm";
+import { getAutoChain } from "./llm-router";
 import { modelById, type ModelDef } from "./models";
 import { computeModelStatus } from "./model-status";
 import { getMemory, renderMemoryMarkdown } from "./memory";
@@ -190,7 +191,7 @@ async function complete(
     // up to 2 attempts on this model (the 2nd only after a brief per-minute wait)
     for (;;) {
       try {
-        console.log(`[route] → trying ${model.provider}/${model.id}`);
+        console.log(`[route] → trying ${model.routerId ?? `${model.provider}/${model.id}`}`);
         // Chat mode sends no tools — omit the tool fields entirely (providers
         // reject an empty tools array with tool_choice "auto").
         const useTools = activeTools && activeTools.length > 0;
@@ -670,9 +671,56 @@ function pagePrompt(mode: string): { sys: string; cap: number } {
   return { sys, cap };
 }
 
+// Reasoning models emit <think> blocks; detect them from the id so the spoken
+// summary strips chain-of-thought even for synthetic auto-chain entries that
+// have no registry ModelDef to read `reasoning` from.
+const REASONING_RE = /gpt-oss|qwen3|qwq|deepseek-r|magistral|reasoning|thinking|o1|o3|\br1\b/i;
+
+// Turn ONE router auto-chain id ("<platform>/<model>") into a synthetic ModelDef
+// the agent's `complete()` loop can drive. The platform is the segment before the
+// first "/"; everything after is the upstream model (which may itself contain
+// "/"). `routerId` carries the exact id so llm.ts uses it verbatim.
+function modelDefFromRouterId(routerId: string): ModelDef {
+  const slash = routerId.indexOf("/");
+  const platform = slash >= 0 ? routerId.slice(0, slash) : routerId;
+  const upstream = slash >= 0 ? routerId.slice(slash + 1) : routerId;
+  return {
+    id: routerId,
+    provider: platform as ModelDef["provider"],
+    label: routerId,
+    routerId,
+    reasoning: REASONING_RE.test(upstream),
+  };
+}
+
+// The cloud voice chain: rotate across EVERY configured provider via the router's
+// auto catalog — identical source to local voice's model:"auto". The router has
+// already filtered to enabled + available (not in cooldown) + not-disabled and
+// ranked strongest-first, so there's nothing left to pre-seed as exhausted; the
+// loop marks daily-spent models at runtime. Returns null when the catalog is
+// empty (no keys configured) so the caller falls back to the registry order.
+async function autoChainOrder(): Promise<{ order: ModelDef[]; exhausted: Set<string> } | null> {
+  try {
+    const ids = await getAutoChain();
+    if (!ids.length) return null;
+    return { order: ids.map(modelDefFromRouterId), exhausted: new Set<string>() };
+  } catch (e) {
+    console.warn("[agent] auto chain unavailable; using registry order:", e);
+    return null;
+  }
+}
+
 // Build the working model order + pre-seeded exhausted set (same logic runAgent
 // uses), for standalone passes like the page-text endpoint.
 async function buildModelOrder(): Promise<{ order: ModelDef[]; exhausted: Set<string> }> {
+  const auto = await autoChainOrder();
+  if (auto) return auto;
+  return buildRegistryModelOrder();
+}
+
+// Registry fallback: the static 8-model chain filtered by user enable/availability.
+// Used only when the auto catalog is empty (e.g. no provider keys configured yet).
+async function buildRegistryModelOrder(): Promise<{ order: ModelDef[]; exhausted: Set<string> }> {
   const { models: statuses, exhaustedIds } = await computeModelStatus();
   const working: ModelDef[] = statuses
     .filter((s) => s.enabled && s.available)
@@ -1182,27 +1230,38 @@ export async function runAgent(
   if (contextContent) messages.push({ role: "system", content: contextContent });
   messages.push({ role: "user", content: userText });
 
-  // Build the working fallback chain: only the user's ENABLED + available models,
-  // in registry order (Gemini first). Pre-seed `exhausted` with models whose
-  // daily quota is currently spent so we skip straight to the next one. If that
-  // would leave nothing to try (everything looks exhausted), start fresh and let
-  // them be re-attempted — a reset may have happened since we recorded it.
+  // Build the working fallback chain. Prefer the router's AUTO catalog so cloud
+  // voice rotates across EVERY configured provider — the same source local voice
+  // gets via model:"auto" — and only fall back to the static registry order when
+  // no provider keys are configured. The auto catalog is already filtered to
+  // enabled + available (not in cooldown) + not-disabled and ranked strongest
+  // first, so its exhausted seed is empty; the loop marks daily-spent at runtime.
+  const auto = await autoChainOrder();
   const { models: statuses, exhaustedIds } = status;
-  const working: ModelDef[] = statuses
-    .filter((s) => s.enabled && s.available)
-    .map((s) => modelById(s.id)!)
-    .filter(Boolean);
-  // Fallback respects the user's untick: never reach for a disabled model just
-  // because the enabled ones are momentarily exhausted/unconfigured.
-  const enabledOrder = statuses.filter((s) => s.enabled).map((s) => modelById(s.id)!).filter(Boolean);
-  const order = working.length
-    ? working
-    : enabledOrder.length
-    ? enabledOrder
-    : statuses.map((s) => modelById(s.id)!).filter(Boolean);
-  const seed = new Set(exhaustedIds);
-  const allSeeded = order.every((m) => seed.has(m.id));
-  const exhausted = allSeeded ? new Set<string>() : seed;
+  let order: ModelDef[];
+  let exhausted: Set<string>;
+  if (auto) {
+    ({ order, exhausted } = auto);
+  } else {
+    // Registry fallback: only the user's ENABLED + available models, in registry
+    // order. Pre-seed `exhausted` with models whose daily quota is currently
+    // spent; if that leaves nothing to try, start fresh (a reset may have
+    // happened since we recorded it).
+    const working: ModelDef[] = statuses
+      .filter((s) => s.enabled && s.available)
+      .map((s) => modelById(s.id)!)
+      .filter(Boolean);
+    // Fallback respects the user's untick: never reach for a disabled model just
+    // because the enabled ones are momentarily exhausted/unconfigured.
+    const enabledOrder = statuses.filter((s) => s.enabled).map((s) => modelById(s.id)!).filter(Boolean);
+    order = working.length
+      ? working
+      : enabledOrder.length
+      ? enabledOrder
+      : statuses.map((s) => modelById(s.id)!).filter(Boolean);
+    const seed = new Set(exhaustedIds);
+    exhausted = order.every((m) => seed.has(m.id)) ? new Set<string>() : seed;
+  }
 
   const actions: AgentResult["actions"] = [];
   // Cache results of identical calls so a stuck model can't repeat a write
