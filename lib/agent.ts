@@ -1351,6 +1351,9 @@ export async function runAgent(
   // A natural-language final reply the model produced AFTER chaining tools — set
   // by the tool-loop below so we can return it directly (no extra summary call).
   let finalReply: string | null = null;
+  // Prefer non-reasoning models for gate/summary calls — no chain-of-thought dump.
+  // Defined here (outside the if/else) so both the gate loop and Pass 2 can share it.
+  const summaryOrder = [...order].sort((a, b) => (a.reasoning ? 1 : 0) - (b.reasoning ? 1 : 0));
 
   if (onlyPreset) {
     // Nothing left for the model to decide. If the tool results are directly
@@ -1429,9 +1432,44 @@ export async function runAgent(
         });
       }
 
-      // The model decides: if it emits more tool calls after seeing the results it
-      // gets another round; if it speaks a final reply the loop exited above.
-      if (!multiRound) break;
+      // Gate: after each tool batch, decide cheaply whether to speak or chain.
+      // Zero-cost first: writes (create/update/delete) are directly speakable.
+      {
+        const direct = directReply(actions);
+        if (direct) { finalReply = direct; break; }
+      }
+      // Cheap gate call (no tool schema — just results + user text, ~1k tokens).
+      // The model either speaks the reply or outputs CONTINUE to chain another round.
+      try {
+        const gateSys =
+          `You are JARVIS. The user made a request and some actions ran. Given their results:\n` +
+          `- If the results FULLY answer the request: reply with ONE short spoken English sentence ` +
+          `(≤${maxWords} words, natural English, no markdown, no lists, no item IDs — it is read aloud).\n` +
+          `- If more actions are STILL needed (e.g. data was fetched but not yet listed, or you need ` +
+          `to act on what was just found): output exactly CONTINUE, nothing else.\n` +
+          `Do NOT output CONTINUE if the results already fully answer the request.`;
+        const gate = await complete(
+          [
+            { role: "system", content: gateSys },
+            { role: "user", content: `User request: "${userText}"\n\nResults:\n${summarizeActions(actions)}` },
+          ],
+          exhausted,
+          [], // no tool schema — cheap speak/continue decision
+          summaryOrder,
+          200
+        );
+        usedModel = gate.model;
+        lastLimits = gate.limits;
+        addUsage(gate.usage);
+        const gateText = cleanReply(gate.completion.choices[0].message.content).trim();
+        if (gateText && !gateText.toUpperCase().startsWith("CONTINUE")) {
+          finalReply = clampWords(gateText, maxWords);
+          break;
+        }
+        // Gate said CONTINUE → fall through, loop continues with full schema
+      } catch {
+        // Gate failed → treat as CONTINUE; Pass 2 handles reply on loop exit
+      }
     }
   }
 
@@ -1467,12 +1505,8 @@ export async function runAgent(
   // results — instead of replaying the whole system prompt + tools just to get a
   // sentence. This is the big token saver: the heavy context is paid once.
   try {
-    // Prefer NON-reasoning models for the spoken summary so we never get a
-    // chain-of-thought dump; reasoning models are used only if nothing else is
-    // left. Cap output short — it's one sentence.
-    const summaryOrder = [...order].sort(
-      (a, b) => (a.reasoning ? 1 : 0) - (b.reasoning ? 1 : 0)
-    );
+    // Pass 2: phrase the spoken reply from a tiny prompt + tool results (fallback).
+    // summaryOrder was computed above the tool loop. Cap output short — one sentence.
     const sum = await complete(
       [
         { role: "system", content: summarySys(maxWords) },
