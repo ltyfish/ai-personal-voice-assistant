@@ -817,6 +817,17 @@
   .main-content { padding:1rem; }
 }
 
+/* The fixed top-left "Systems online" tag overlaps the CENTRED navbar pill on
+   medium widths: with the inline tabs still shown the navbar is at its widest
+   and its left edge grows past the status text, leaving only "S…" peeking out.
+   The <760px rule below hides it on phones, but the overlap actually spans up
+   to ~1080px — hide it across that whole band. It only shows on wide screens
+   where the centred navbar can't reach the left gutter. The brand pill's
+   pulsing dot already signals live state on narrower screens. */
+@media (max-width:1080px) {
+  .jarvis-status-fixed { display:none; }
+}
+
 /* Phone nav: the inline tab pill can't fit, so hide it — every tab moves into
    the hamburger (see MailApp `menuTabs`). Keep the brand pill centred and the
    burger pinned top-right. Matches the 760px JS breakpoint in MailApp/ModelHud. */

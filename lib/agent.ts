@@ -1437,12 +1437,18 @@ export async function runAgent(
       // The model either speaks the reply or outputs CONTINUE to chain another round.
       try {
         const gateSys =
-          `You are JARVIS. The user made a request and some actions ran. Given their results:\n` +
-          `- If the results FULLY answer the request: reply with ONE short spoken English sentence ` +
-          `(≤${maxWords} words, natural English, no markdown, no lists, no item IDs — it is read aloud).\n` +
-          `- If more actions are STILL needed (e.g. data was fetched but not yet listed, or you need ` +
-          `to act on what was just found): output exactly CONTINUE, nothing else.\n` +
-          `Do NOT output CONTINUE if the results already fully answer the request.`;
+          `You are JARVIS. The user made a request and some actions ran so far. Compare what the ` +
+          `user ASKED FOR against what the results below actually show was done.\n` +
+          `- If EVERY part of the request is already reflected in the results: reply with ONE short ` +
+          `spoken English sentence (≤${maxWords} words, natural English, no markdown, no lists, no ` +
+          `item IDs — it is read aloud).\n` +
+          `- If ANY part is still not done — e.g. the request named several things and only some ran, ` +
+          `a follow-up step depends on what was just created (a subtask under a task that was only ` +
+          `just made, replying to an email that was only just fetched), or data was fetched but not ` +
+          `yet acted on: output exactly CONTINUE, nothing else.\n` +
+          `Multi-part requests (X "and" Y, or several items) almost always need CONTINUE until you ` +
+          `can see an action for EACH part. When unsure, output CONTINUE.\n` +
+          `Never claim you did something that is not present in the results below.`;
         const gate = await complete(
           [
             { role: "system", content: gateSys },
