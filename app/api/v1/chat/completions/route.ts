@@ -19,7 +19,13 @@ export async function POST(req: NextRequest) {
   if (required) {
     const auth = req.headers.get("authorization") ?? "";
     const token = auth.replace(/^Bearer\s+/i, "");
-    if (token !== required) {
+    // The app's OWN browser (voice/local tool loop, Pipeline) calls this
+    // same-origin without the proxy key — it has no safe way to hold the secret.
+    // `Sec-Fetch-Site: same-origin` is set by the browser and cannot be forged by
+    // JS, so we let same-origin requests through while still requiring the key for
+    // EXTERNAL OpenAI-compatible clients hitting the public URL.
+    const sameOrigin = req.headers.get("sec-fetch-site") === "same-origin";
+    if (token !== required && !sameOrigin) {
       return NextResponse.json(
         { error: { message: "Unauthorized", type: "invalid_request_error" } },
         { status: 401 },
