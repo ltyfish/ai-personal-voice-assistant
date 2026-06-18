@@ -477,6 +477,38 @@ function openTarget(target) {
   }
 }
 
+// Shut down (or cancel a pending shutdown of) this computer. Deterministic verb
+// — no free shell. Args are strictly numeric/boolean so nothing can be injected.
+// A non-zero delay (default 60s) leaves a window to abort via cancel.
+function shutdownComputer(delaySec, cancel) {
+  const delay = Math.max(0, Math.min(86400, Math.floor(Number(delaySec) || 0)));
+  try {
+    if (platform === "win32") {
+      const args = cancel ? ["/a"] : ["/s", "/t", String(delay), "/c", "JARVIS shutdown"];
+      const r = spawnSync("shutdown", args, { timeout: 8000, encoding: "utf8", windowsHide: true });
+      // `shutdown /a` errors (1116) if nothing is scheduled — report that plainly.
+      if (r.status !== 0) {
+        const err = (r.stderr || r.stdout || "").trim();
+        if (cancel) return { ok: false, error: err || "no shutdown was scheduled to cancel" };
+        return { ok: false, error: err || "couldn't start shutdown" };
+      }
+    } else if (platform === "darwin") {
+      if (cancel) return { ok: false, error: "cancel isn't supported on macOS" };
+      // `shutdown` needs root on macOS; osascript asks the logged-in user nicely.
+      spawnSync("osascript", ["-e", 'tell app "System Events" to shut down'], { timeout: 8000 });
+    } else {
+      const args = cancel ? ["-c"] : ["-h", delay > 0 ? `+${Math.ceil(delay / 60)}` : "now"];
+      const r = spawnSync("shutdown", args, { timeout: 8000, encoding: "utf8" });
+      if (r.status !== 0) return { ok: false, error: (r.stderr || "").trim() || "shutdown failed" };
+    }
+    console.log(`[bridge] shutdown ${cancel ? "cancelled" : `in ${delay}s`}`);
+    return { ok: true, cancel: !!cancel, delaySec: delay };
+  } catch (err) {
+    console.error("[bridge] shutdown failed:", err.message);
+    return { ok: false, error: "couldn't run shutdown" };
+  }
+}
+
 // WhatsApp send: open the chat (whatsapp:// or wa.me link) with the message
 // pre-filled, then — if autoSend — press Enter once after a short delay so the
 // already-typed message goes out. We deliberately send ONLY {ENTER}, nothing
@@ -1735,6 +1767,8 @@ async function dispatchAction(body) {
     if (body.action === "open") result = openTarget(String(body.target || ""));
     else if (body.action === "whatsapp_send")
       result = whatsAppSend(String(body.target || ""), !!body.autoSend);
+    else if (body.action === "shutdown")
+      result = shutdownComputer(body.delaySec, !!body.cancel);
     else if (body.action === "open_app")
       result = openApp(
         String(body.target || ""),
@@ -1784,7 +1818,7 @@ const server = http.createServer((req, res) => {
 
   if (url.pathname === "/health" && req.method === "GET") {
     if (!authed(req)) return send(res, 401, { error: "unauthorized" });
-    const verbs = ["open", "open_app", "whatsapp_send", "page_snapshot", "page_text", "page_act", "local_status", "local_chat", "hermes_run", ...(shellEnabled ? ["run_shell"] : [])];
+    const verbs = ["open", "open_app", "whatsapp_send", "shutdown", "page_snapshot", "page_text", "page_act", "local_status", "local_chat", "hermes_run", ...(shellEnabled ? ["run_shell"] : [])];
     const home =
       process.env.USERPROFILE || process.env.HOME || ""; // the real home dir
     return send(res, 200, { ok: true, verbs, shellEnabled, home });

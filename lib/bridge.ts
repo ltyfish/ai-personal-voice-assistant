@@ -315,6 +315,8 @@ export async function runLocalAction(
     ...(intent.fallback ? { fallback: intent.fallback } : {}),
     ...(intent.only ? { only: intent.only } : {}),
     ...(intent.autoSend ? { autoSend: true } : {}),
+    ...(intent.cancel ? { cancel: true } : {}),
+    ...(intent.delaySec != null ? { delaySec: intent.delaySec } : {}),
     // So the bridge can fall back to opening a FOLDER by this name under the
     // user's configured default folder (e.g. "open internship orders"). On the
     // phone this may be empty; the bridge then uses its own home dir.
@@ -331,6 +333,18 @@ export async function runLocalAction(
       message: data.autoSend
         ? `Sending your ${intent.label} message…`
         : `Opened ${intent.label} with the message ready — press Enter to send.`,
+    };
+  }
+  // Shutdown: report whether we cancelled or how long until the machine powers off.
+  if (intent.local_action === "shutdown") {
+    if (intent.cancel) return { ok: true, message: "Cancelled the shutdown." };
+    const s = intent.delaySec ?? 0;
+    return {
+      ok: true,
+      message:
+        s > 0
+          ? `Shutting down your computer in ${s} second${s === 1 ? "" : "s"}. Say "cancel the shutdown" to stop it.`
+          : "Shutting down your computer now.",
     };
   }
   // The bridge tells us what it actually opened (app / folder / website).

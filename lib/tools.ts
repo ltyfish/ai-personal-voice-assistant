@@ -714,6 +714,30 @@ export const toolDefs = [
   {
     type: "function" as const,
     function: {
+      name: "shutdown_computer",
+      description:
+        "Shut down (power off) the user's computer, or CANCEL a shutdown that is already counting down. Use for 'shut down my computer', 'turn off my pc', 'power off', and 'cancel the shutdown' / 'don't shut down / abort'. Works WITHOUT developer mode. The user's device confirms before anything happens, and the shutdown itself runs after a short delay so it can be aborted.",
+      parameters: {
+        type: "object",
+        properties: {
+          delaySec: {
+            type: ["number", "null"],
+            description:
+              "seconds to wait before powering off (default 60). Use 0 for immediate. If the user says e.g. 'in 5 minutes' convert to seconds (300).",
+          },
+          cancel: {
+            type: ["boolean", "null"],
+            description:
+              "set true to ABORT a shutdown that is already counting down ('cancel the shutdown', 'don't turn off').",
+          },
+        },
+        required: [],
+      },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
       name: "run_shell",
       description:
         "DEVELOPER MODE: run an arbitrary PowerShell command on the user's Windows machine. Use ONLY when the user explicitly asks to run a command / PowerShell / script (e.g. 'run the command ...', 'in PowerShell ...'). To simply OPEN A FOLDER by name, do NOT use this — use open_app (it opens folders without developer mode). " +
@@ -1015,10 +1039,11 @@ const TOOL_GROUPS: { key: GroupKey; tools: string[]; re: RegExp }[] = [
   },
   {
     key: "local",
-    tools: ["open_app", "read_site"],
+    tools: ["open_app", "read_site", "shutdown_computer"],
     // "folder"/"directory" live here (not shell): opening a folder by name goes
     // through open_app's folder fallback, which works WITHOUT developer mode.
-    re: /\b(open|launch|website|site|browser|google|search|go to|app|tab|folder|directory|youtube|discord|whatsapp|spotify|notepad|calculator|explorer)\b|\.\w{2,}/i,
+    // "shut down/turn off/power off" → shutdown_computer (also without dev mode).
+    re: /\b(open|launch|website|site|browser|google|search|go to|app|tab|folder|directory|youtube|discord|whatsapp|spotify|notepad|calculator|explorer|shut\s?down|shutdown|turn off|power off|reboot)\b|\.\w{2,}/i,
   },
   {
     key: "shell",
@@ -1937,6 +1962,27 @@ async function execTool(name: string, args: Args): Promise<unknown> {
             : only === "app"
             ? "Proposed only — opens the app. The user's device confirms first."
             : "Proposed only — tries the app, then a folder, then the website. The user's device confirms first.",
+      };
+    }
+    case "shutdown_computer": {
+      const cancel = args.cancel === true;
+      // Clamp the delay to a sane range; default 60s so it's abortable.
+      let delaySec = cancel ? 0 : 60;
+      if (!cancel && args.delaySec != null && Number.isFinite(Number(args.delaySec))) {
+        delaySec = Math.max(0, Math.min(86400, Math.round(Number(args.delaySec))));
+      }
+      return {
+        local_action: "shutdown",
+        target: cancel ? "cancel" : "shutdown",
+        label: cancel
+          ? "cancel the shutdown"
+          : delaySec > 0
+          ? `shut down your computer in ${delaySec} second${delaySec === 1 ? "" : "s"}`
+          : "shut down your computer now",
+        cancel,
+        delaySec,
+        pending: true,
+        note: "Proposed only — the user's device confirms before the computer powers off (or the shutdown is cancelled).",
       };
     }
     case "run_shell": {

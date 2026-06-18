@@ -956,7 +956,8 @@ export default function VoiceButton({ onDone }: { onDone: () => void }) {
         r &&
         (r.local_action === "open" ||
           r.local_action === "open_app" ||
-          r.local_action === "whatsapp_send") &&
+          r.local_action === "whatsapp_send" ||
+          r.local_action === "shutdown") &&
         r.target
       ) {
         return {
@@ -964,6 +965,8 @@ export default function VoiceButton({ onDone }: { onDone: () => void }) {
           target: r.target,
           label: r.label || r.target,
           ...(r.autoSend ? { autoSend: true } : {}),
+          ...(r.cancel ? { cancel: true } : {}),
+          ...(r.delaySec != null ? { delaySec: r.delaySec } : {}),
         };
       }
     }
@@ -972,9 +975,12 @@ export default function VoiceButton({ onDone }: { onDone: () => void }) {
 
   // Phrase the confirm/run wording per action: WhatsApp "sends", the rest "open".
   function actionVerb(intent: LocalActionIntent): { ask: string; doing: string } {
-    return intent.local_action === "whatsapp_send"
-      ? { ask: "send", doing: "Sending" }
-      : { ask: "open", doing: "Opening" };
+    if (intent.local_action === "whatsapp_send")
+      return { ask: "send", doing: "Sending" };
+    // shutdown's label is already a full phrase ("shut down your computer in 60
+    // seconds" / "cancel the shutdown"), so no leading verb is needed.
+    if (intent.local_action === "shutdown") return { ask: "", doing: "Okay —" };
+    return { ask: "open", doing: "Opening" };
   }
 
   // Pull a run_shell intent out of the agent's action results, if any.
@@ -2025,9 +2031,17 @@ export default function VoiceButton({ onDone }: { onDone: () => void }) {
         {pendingAction && (
           <div className="jarvis-confirm">
             <p>
-              {pendingAction.local_action === "whatsapp_send" ? "Send" : "Open"}{" "}
-              <span className="font-semibold">{pendingAction.label}</span> on your
-              computer?
+              {pendingAction.local_action === "shutdown" ? (
+                <>
+                  <span className="font-semibold">{pendingAction.label}</span>?
+                </>
+              ) : (
+                <>
+                  {pendingAction.local_action === "whatsapp_send" ? "Send" : "Open"}{" "}
+                  <span className="font-semibold">{pendingAction.label}</span> on your
+                  computer?
+                </>
+              )}
             </p>
             <div className="flex gap-2">
               <button className="deck-btn" onClick={manualConfirm}>

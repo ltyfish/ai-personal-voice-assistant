@@ -11,7 +11,13 @@
 //   "run_shell"     -> developer mode: run a PowerShell command (gated + confirmed)
 //   "whatsapp_send" -> open WhatsApp on a chat with the message pre-filled, and
 //                      (optionally) auto-press Enter to send it
-export type LocalActionKind = "open" | "open_app" | "run_shell" | "whatsapp_send";
+//   "shutdown"      -> shut down (or cancel a pending shutdown of) the computer
+export type LocalActionKind =
+  | "open"
+  | "open_app"
+  | "run_shell"
+  | "whatsapp_send"
+  | "shutdown";
 
 // A proposed action handed back to the browser to confirm + run.
 export type LocalActionIntent = {
@@ -22,6 +28,8 @@ export type LocalActionIntent = {
   only?: "app" | "folder"; // for open_app: force just this kind (user said "X app"/"X folder")
   command?: string; // for run_shell: the literal PowerShell command to run
   autoSend?: boolean; // for whatsapp_send: bridge presses Enter after opening
+  delaySec?: number; // for shutdown: seconds before the machine powers off
+  cancel?: boolean; // for shutdown: abort a pending shutdown instead of starting one
 };
 
 // Friendly site names -> URLs, so "open YouTube" works without a full URL.
