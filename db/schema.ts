@@ -30,6 +30,10 @@ export const tasks = pgTable("tasks", {
   done: boolean("done").notNull().default(false),
   priority: priorityEnum("priority").notNull().default("medium"),
   dueDate: timestamp("due_date", { withTimezone: true }),
+  // Manual drag-order. Lower = higher in the list. When the user reorders, this
+  // overrides priority-sort. Defaults large so brand-new rows fall to the bottom
+  // until first reordered.
+  position: integer("position").notNull().default(1000000),
   createdAt: timestamp("created_at", { withTimezone: true })
     .notNull()
     .defaultNow(),
@@ -47,6 +51,7 @@ export const subtasks = pgTable("subtasks", {
   done: boolean("done").notNull().default(false),
   priority: priorityEnum("priority").notNull().default("medium"),
   dueDate: timestamp("due_date", { withTimezone: true }),
+  position: integer("position").notNull().default(1000000), // manual drag-order within a task
   createdAt: timestamp("created_at", { withTimezone: true })
     .notNull()
     .defaultNow(),
@@ -73,6 +78,7 @@ export const projects = pgTable("projects", {
     .notNull()
     .default({}),
   done: boolean("done").notNull().default(false),
+  position: integer("position").notNull().default(1000000), // manual drag-order
   createdAt: timestamp("created_at", { withTimezone: true })
     .notNull()
     .defaultNow(),
@@ -110,6 +116,7 @@ export const notes = pgTable("notes", {
   body: text("body").notNull(),
   // Optional date the note is "about" — when set, the note shows on the calendar.
   date: timestamp("date", { withTimezone: true }),
+  position: integer("position").notNull().default(1000000), // manual drag-order
   createdAt: timestamp("created_at", { withTimezone: true })
     .notNull()
     .defaultNow(),

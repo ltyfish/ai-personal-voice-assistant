@@ -205,10 +205,10 @@ export default function GitHub() {
       <details className="collapse" open>
         <summary>Repositories<span className="col-sub">{repos.length}</span><span className="col-caret" /></summary>
         <div className="collapse-body">
-          <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
+          <div style={{ display: "flex", gap: 8, marginBottom: 8, flexWrap: "wrap" }}>
             <input className="a-input" placeholder="owner/repo (e.g. vercel/next.js)" value={repoInput}
-              onChange={(e) => setRepoInput(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") addRepo(); }} style={{ flex: 1 }} />
-            <button className="a-btn" disabled={!repoInput.includes("/")} onClick={addRepo}>Add</button>
+              onChange={(e) => setRepoInput(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") addRepo(); }} style={{ flex: 1, minWidth: 0 }} />
+            <button className="a-btn" disabled={!repoInput.includes("/")} onClick={addRepo} style={{ flexShrink: 0 }}>Add</button>
           </div>
           {repos.length === 0 ? <p className="tab-sub" style={{ fontSize: 12 }}>None yet — add a repo to track its PRs.</p> : (
             <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>

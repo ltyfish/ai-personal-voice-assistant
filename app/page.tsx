@@ -8,6 +8,8 @@ import { refOf } from "@/lib/refs";
 import Reminders from "@/components/Reminders";
 import { Select, DateField } from "@/components/ui/Field";
 import BootSequence from "@/components/jarvis/BootSequence";
+import { SortableList, type DragHandle } from "@/components/dnd/SortableList";
+import { NestedSortable } from "@/components/dnd/NestedSortable";
 import "./mail/mail.css";
 
 type Task = {
@@ -183,14 +185,19 @@ function TasksPanel({ tasks, refresh }: { tasks: Task[]; refresh: () => void }) 
   const [draft, setDraft] = useState("");
   const [showDone, setShowDone] = useState(false);
 
-  // Open tasks sorted high → medium → low so priority is reflected in the order;
-  // ties keep the API's order (newest first). slice() so we don't mutate props.
-  const PRIO_ORDER: Record<string, number> = { high: 0, medium: 1, low: 2 };
-  const open = tasks
-    .filter((t) => !t.done)
-    .slice()
-    .sort((a, b) => (PRIO_ORDER[a.priority] ?? 1) - (PRIO_ORDER[b.priority] ?? 1));
+  // Manual drag-order wins: the API already returns rows sorted by `position`,
+  // so just keep that order here (no priority re-sort).
+  const open = tasks.filter((t) => !t.done);
   const done = tasks.filter((t) => t.done);
+
+  const reorderTasks = async (ids: string[]) => {
+    await fetch("/api/tasks/reorder", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ids }),
+    });
+    refresh();
+  };
 
   const add = async () => {
     if (!title.trim()) return;
@@ -235,10 +242,19 @@ function TasksPanel({ tasks, refresh }: { tasks: Task[]; refresh: () => void }) 
     refresh();
   };
 
-  // subtasks (Google-Tasks style) — kept in the panel, fetched on its own
+  // subtasks (Google-Tasks style) — kept in the panel, fetched on its own.
+  // Multiple tasks can be expanded at once so subtasks can be dragged BETWEEN
+  // tasks (their lists need to be visible simultaneously).
   const [subs, setSubs] = useState<Subtask[]>([]);
-  const [expanded, setExpanded] = useState<string | null>(null);
-  const [subDraft, setSubDraft] = useState("");
+  const [expandedSet, setExpandedSet] = useState<Set<string>>(new Set());
+  const toggleExpanded = (id: string) =>
+    setExpandedSet((prev) => {
+      const next = new Set(prev);
+      next.has(id) ? next.delete(id) : next.add(id);
+      return next;
+    });
+  // Per-task "add subtask" draft so multiple open inputs don't share text.
+  const [subDrafts, setSubDrafts] = useState<Record<string, string>>({});
   const loadSubs = useCallback(async () => {
     try {
       const r = await fetch("/api/subtasks", { cache: "no-store" });
@@ -269,13 +285,14 @@ function TasksPanel({ tasks, refresh }: { tasks: Task[]; refresh: () => void }) 
 
   const subsFor = (taskId: string) => subs.filter((s) => s.taskId === taskId);
   const addSub = async (taskId: string) => {
-    if (!subDraft.trim()) return;
+    const draft = (subDrafts[taskId] ?? "").trim();
+    if (!draft) return;
     await fetch("/api/subtasks", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ taskId, title: subDraft.trim() }),
+      body: JSON.stringify({ taskId, title: draft }),
     });
-    setSubDraft("");
+    setSubDrafts((d) => ({ ...d, [taskId]: "" }));
     loadSubs();
     refresh(); // keep the calendar's subtask copy in sync
   };
@@ -293,14 +310,79 @@ function TasksPanel({ tasks, refresh }: { tasks: Task[]; refresh: () => void }) 
     loadSubs();
     refresh();
   };
+  // Commit a full subtask arrangement after a drag (within OR across tasks).
+  // Each task's reorder call also re-parents its ids, so a subtask dragged from
+  // task A to task B is moved (taskId=B) and ordered in one shot.
+  const moveSubs = async (map: Record<string, string[]>) => {
+    await Promise.all(
+      Object.entries(map).map(([taskId, ids]) =>
+        fetch("/api/subtasks/reorder", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ taskId, ids }),
+        })
+      )
+    );
+    loadSubs();
+    refresh();
+  };
 
-  const row = (t: Task) => {
+  // One subtask row. `handle` present ⇒ draggable (grip + dnd refs); absent ⇒
+  // static (used under completed tasks, which aren't part of the DnD context).
+  const subItem = (s: Subtask, handle?: DragHandle) => (
+    <div
+      ref={handle?.setNodeRef}
+      style={handle?.style}
+      className={`subtask${s.done ? " is-done" : ""}`}
+    >
+      {handle && (
+        <span className="drag-grip sm" {...handle.handleProps} title="Drag to reorder / move" aria-label="Drag subtask">
+          ⠿
+        </span>
+      )}
+      <button
+        className={`todo-check sm${s.done ? " on" : ""}`}
+        onClick={() => patchSub(s.id, { done: !s.done })}
+        aria-label={s.done ? "Mark not done" : "Mark done"}
+      >
+        {s.done ? "✓" : ""}
+      </button>
+      <input
+        className="subtask-title"
+        defaultValue={s.title}
+        onBlur={(e) => e.target.value !== s.title && patchSub(s.id, { title: e.target.value })}
+      />
+      <DateField
+        value={toInput(s.dueDate)}
+        onChange={(v) => patchSub(s.id, { dueDate: toIso(v) })}
+        placeholder="Date"
+        className="subtask-date"
+      />
+      <button className="icon-x" onClick={() => delSub(s.id)} title="Delete subtask">
+        ✕
+      </button>
+    </div>
+  );
+
+  // `subtaskBody` is supplied by the NestedSortable (the drag-wired subtask list)
+  // for OPEN tasks. Completed tasks pass none → a plain static subtask list.
+  const row = (t: Task, handle?: DragHandle, subtaskBody?: React.ReactNode) => {
     const tSubs = subsFor(t.id);
-    const open = expanded === t.id;
+    const open = expandedSet.has(t.id);
     const doneSubs = tSubs.filter((s) => s.done).length;
     return (
-      <li key={t.id} className={`todo-item${t.done ? " is-done" : ""}${open ? " open" : ""}`}>
+      <li
+        key={t.id}
+        ref={handle?.setNodeRef}
+        style={handle?.style}
+        className={`todo-item${t.done ? " is-done" : ""}${open ? " open" : ""}`}
+      >
         <div className="todo-row">
+          {handle && (
+            <span className="drag-grip" {...handle.handleProps} title="Drag to reorder" aria-label="Drag to reorder">
+              ⠿
+            </span>
+          )}
           <button
             className={`todo-check${t.done ? " on" : ""}`}
             onClick={() => toggle(t)}
@@ -353,7 +435,7 @@ function TasksPanel({ tasks, refresh }: { tasks: Task[]; refresh: () => void }) 
           <RefChip id={taskRef(t)} />
           <button
             className={`todo-expand${open ? " open" : ""}`}
-            onClick={() => setExpanded(open ? null : t.id)}
+            onClick={() => toggleExpanded(t.id)}
             title="Edit date & subtasks"
             aria-label="Edit date & subtasks"
           >
@@ -380,38 +462,14 @@ function TasksPanel({ tasks, refresh }: { tasks: Task[]; refresh: () => void }) 
               )}
             </div>
 
-            <ul className="subtask-list">
-              {tSubs.map((s) => (
-                <li key={s.id} className={`subtask${s.done ? " is-done" : ""}`}>
-                  <button
-                    className={`todo-check sm${s.done ? " on" : ""}`}
-                    onClick={() => patchSub(s.id, { done: !s.done })}
-                    aria-label={s.done ? "Mark not done" : "Mark done"}
-                  >
-                    {s.done ? "✓" : ""}
-                  </button>
-                  <input
-                    className="subtask-title"
-                    defaultValue={s.title}
-                    onBlur={(e) => e.target.value !== s.title && patchSub(s.id, { title: e.target.value })}
-                  />
-                  <DateField
-                    value={toInput(s.dueDate)}
-                    onChange={(v) => patchSub(s.id, { dueDate: toIso(v) })}
-                    placeholder="Date"
-                    className="subtask-date"
-                  />
-                  <button className="icon-x" onClick={() => delSub(s.id)} title="Delete subtask">
-                    ✕
-                  </button>
-                </li>
-              ))}
-            </ul>
+            {subtaskBody ?? (
+              <div className="subtask-list">{tSubs.map((s) => subItem(s))}</div>
+            )}
 
             <div className="subtask-add">
               <input
-                value={expanded === t.id ? subDraft : ""}
-                onChange={(e) => setSubDraft(e.target.value)}
+                value={subDrafts[t.id] ?? ""}
+                onChange={(e) => setSubDrafts((d) => ({ ...d, [t.id]: e.target.value }))}
                 onKeyDown={(e) => e.key === "Enter" && addSub(t.id)}
                 placeholder="Add a subtask…"
               />
@@ -446,17 +504,34 @@ function TasksPanel({ tasks, refresh }: { tasks: Task[]; refresh: () => void }) 
         </button>
       </div>
 
-      <ul className="todo-list">
-        {open.map(row)}
-        {open.length === 0 && <li className="todo-empty">All clear. Nothing to do 🎉</li>}
-      </ul>
+      {open.length === 0 ? (
+        <ul className="todo-list">
+          <li className="todo-empty">All clear. Nothing to do 🎉</li>
+        </ul>
+      ) : (
+        <NestedSortable
+          containers={open.map((t) => ({ id: t.id, itemIds: subsFor(t.id).map((s) => s.id) }))}
+          onReorderContainers={reorderTasks}
+          onMoveItems={moveSubs}
+          containerClassName="todo-list"
+          zoneClassName="subtask-list"
+          renderContainer={(taskId, h, body) => {
+            const t = open.find((x) => x.id === taskId);
+            return t ? row(t, h, expandedSet.has(taskId) ? body : undefined) : null;
+          }}
+          renderItem={(subId, _taskId, h) => {
+            const s = subs.find((x) => x.id === subId);
+            return s ? subItem(s, h) : null;
+          }}
+        />
+      )}
 
       {done.length > 0 && (
         <div className="todo-done">
           <button className="todo-done-toggle" onClick={() => setShowDone((s) => !s)}>
             {showDone ? "▾" : "▸"} Completed ({done.length})
           </button>
-          {showDone && <ul className="todo-list">{done.map(row)}</ul>}
+          {showDone && <ul className="todo-list">{done.map((t) => row(t))}</ul>}
         </div>
       )}
     </div>
@@ -1130,6 +1205,14 @@ function NotesPanel({ notes, refresh }: { notes: Note[]; refresh: () => void }) 
     await fetch(`/api/notes/${id}`, { method: "DELETE" });
     refresh();
   };
+  const reorderNotes = async (ids: string[]) => {
+    await fetch("/api/notes/reorder", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ids }),
+    });
+    refresh();
+  };
 
   return (
     <div className="keep">
@@ -1153,36 +1236,52 @@ function NotesPanel({ notes, refresh }: { notes: Note[]; refresh: () => void }) 
         </button>
       </div>
 
-      <div className="keep-grid">
-        {notes.map((n) => (
-          <div key={n.id} className="keep-card">
-            {n.date && (
-              <div className="keep-card-date">
-                📅 {new Date(n.date).toLocaleDateString([], { month: "short", day: "numeric", year: "numeric" })}
+      {notes.length === 0 ? (
+        <div className="keep-grid">
+          <p className="keep-empty">No notes yet. Jot one above.</p>
+        </div>
+      ) : (
+        <SortableList
+          items={notes}
+          onReorder={reorderNotes}
+          className="keep-grid"
+          grid
+          renderItem={(n, h) => (
+            <div ref={h.setNodeRef} style={h.style} className="keep-card">
+              <div className="keep-card-head">
+                {n.date ? (
+                  <div className="keep-card-date">
+                    📅 {new Date(n.date).toLocaleDateString([], { month: "short", day: "numeric", year: "numeric" })}
+                  </div>
+                ) : (
+                  <span />
+                )}
+                <span className="drag-grip" {...h.handleProps} title="Drag to reorder" aria-label="Drag note">
+                  ⠿
+                </span>
               </div>
-            )}
-            <textarea
-              className="keep-card-body"
-              defaultValue={n.body}
-              onBlur={(e) => e.target.value !== n.body && save(n.id, e.target.value)}
-            />
-            <div className="keep-card-foot">
-              <DateField
-                value={n.date ? new Date(n.date).toISOString().slice(0, 10) : ""}
-                onChange={(v) => setDate(n.id, v ? new Date(v).toISOString() : null)}
-                withTime={false}
-                placeholder="Add date"
-                className="keep-date"
+              <textarea
+                className="keep-card-body"
+                defaultValue={n.body}
+                onBlur={(e) => e.target.value !== n.body && save(n.id, e.target.value)}
               />
-              <RefChip id={noteRef(n)} />
-              <button className="icon-x" onClick={() => del(n.id)} title="Delete">
-                🗑
-              </button>
+              <div className="keep-card-foot">
+                <DateField
+                  value={n.date ? new Date(n.date).toISOString().slice(0, 10) : ""}
+                  onChange={(v) => setDate(n.id, v ? new Date(v).toISOString() : null)}
+                  withTime={false}
+                  placeholder="Add date"
+                  className="keep-date"
+                />
+                <RefChip id={noteRef(n)} />
+                <button className="icon-x" onClick={() => del(n.id)} title="Delete">
+                  🗑
+                </button>
+              </div>
             </div>
-          </div>
-        ))}
-        {notes.length === 0 && <p className="keep-empty">No notes yet. Jot one above.</p>}
-      </div>
+          )}
+        />
+      )}
     </div>
   );
 }
@@ -1225,6 +1324,171 @@ function ProjectsPanel({
     await fetch(`/api/projects/${id}`, { method: "DELETE" });
     refresh();
   };
+  const reorderProjects = async (ids: string[]) => {
+    await fetch("/api/projects/reorder", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ids }),
+    });
+    refresh();
+  };
+
+  // ── Improvements drag (within AND across projects) ──
+  // Improvements are plain strings inside each project's `improvements` array, so
+  // their drag identity is `${projectId}::${index}`. This logic lives at the
+  // panel (not the card) so a cross-project move can update both projects and so
+  // the NestedSortable can preview the move live.
+  const projById = (id: string) => projects.find((p) => p.id === id);
+  const impId = (pid: string, i: number) => `${pid}::${i}`;
+  const parseImpId = (id: string) => {
+    const i = id.lastIndexOf("::");
+    return { pid: id.slice(0, i), idx: Number(id.slice(i + 2)) };
+  };
+  const [editImpId, setEditImpId] = useState<string | null>(null);
+  const [impDraft, setImpDraft] = useState("");
+
+  const saveImp = (pid: string, idx: number, raw: string) => {
+    const p = projById(pid);
+    if (!p) return;
+    const newText = raw.trim();
+    if (!newText) return;
+    const next = p.improvements.slice();
+    const oldText = next[idx];
+    next[idx] = newText;
+    const body: { improvements: string[]; improvementTimes?: Record<string, ImpTime> } = { improvements: next };
+    if (oldText !== newText && p.improvementTimes[oldText]) {
+      const t = { ...p.improvementTimes };
+      t[newText] = t[oldText];
+      delete t[oldText];
+      body.improvementTimes = t;
+    }
+    patch(pid, body);
+  };
+  const delImp = (pid: string, idx: number) => {
+    const p = projById(pid);
+    if (!p) return;
+    const removed = p.improvements[idx];
+    const t = { ...p.improvementTimes };
+    delete t[removed];
+    patch(pid, { improvements: p.improvements.filter((_, i) => i !== idx), improvementTimes: t });
+  };
+  const setImpStart = (pid: string, imp: string, iso: string | null) => {
+    const p = projById(pid);
+    if (!p) return;
+    const t = { ...p.improvementTimes };
+    if (iso) {
+      const prevEnd = impEndIso(t[imp]);
+      t[imp] = prevEnd ? { start: iso, end: prevEnd } : { start: iso };
+    } else {
+      delete t[imp];
+    }
+    patch(pid, { improvementTimes: t });
+  };
+  const setImpEnd = (pid: string, imp: string, iso: string | null) => {
+    const p = projById(pid);
+    if (!p) return;
+    const start = impStartIso(p.improvementTimes[imp]);
+    if (!start) return;
+    const t = { ...p.improvementTimes };
+    t[imp] = iso ? { start, end: iso } : { start };
+    patch(pid, { improvementTimes: t });
+  };
+  // Commit a full improvement arrangement after a drag. Translate each id back to
+  // its text (+ scheduled time) via a registry of the CURRENT projects, then
+  // PATCH every touched project's improvements + improvementTimes.
+  const moveImprovements = (map: Record<string, string[]>) => {
+    const reg: Record<string, { text: string; time?: ImpTime }> = {};
+    for (const p of projects)
+      p.improvements.forEach((text, i) => {
+        reg[impId(p.id, i)] = { text, time: p.improvementTimes[text] };
+      });
+    Promise.all(
+      Object.entries(map).map(([pid, ids]) => {
+        const texts = ids.map((id) => reg[id]?.text).filter((x): x is string => x != null);
+        const times: Record<string, ImpTime> = {};
+        ids.forEach((id) => {
+          const r = reg[id];
+          if (r && r.time !== undefined) times[r.text] = r.time;
+        });
+        return fetch(`/api/projects/${pid}`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ improvements: texts, improvementTimes: times }),
+        });
+      })
+    ).then(() => refresh());
+  };
+
+  const impItemRow = (itemId: string, h: DragHandle) => {
+    const { pid, idx } = parseImpId(itemId);
+    const p = projById(pid);
+    if (!p) return null;
+    const imp = p.improvements[idx];
+    if (imp == null) return null;
+    const editing = editImpId === itemId;
+    const sIso = impStartIso(p.improvementTimes[imp]);
+    const eIso = impEndIso(p.improvementTimes[imp]);
+    const startInput = sIso ? toLocalInput(new Date(sIso)) : "";
+    const endInput = eIso ? toLocalInput(new Date(eIso)) : "";
+    return (
+      <li ref={h.setNodeRef} style={h.style} className="proj-imp">
+        <div className="proj-imp-main">
+          <span className="drag-grip sm" {...h.handleProps} title="Drag to reorder / move to another project" aria-label="Drag improvement">
+            ⠿
+          </span>
+          {editing ? (
+            <input
+              autoFocus
+              className="proj-imp-edit"
+              value={impDraft}
+              onChange={(e) => setImpDraft(e.target.value)}
+              onBlur={() => {
+                saveImp(pid, idx, impDraft);
+                setEditImpId(null);
+              }}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  saveImp(pid, idx, impDraft);
+                  setEditImpId(null);
+                }
+                if (e.key === "Escape") setEditImpId(null);
+              }}
+            />
+          ) : (
+            <span
+              className="proj-imp-text"
+              title="click to edit"
+              onClick={() => {
+                setEditImpId(itemId);
+                setImpDraft(imp);
+              }}
+            >
+              {imp}
+            </span>
+          )}
+          <button className="icon-x" onClick={() => delImp(pid, idx)} title="Delete">
+            ✕
+          </button>
+        </div>
+        <div className="proj-imp-dates">
+          <DateField
+            value={startInput}
+            onChange={(v) => setImpStart(pid, imp, v ? new Date(v).toISOString() : null)}
+            placeholder="Start"
+            className="proj-imp-date"
+          />
+          {startInput && (
+            <DateField
+              value={endInput}
+              onChange={(v) => setImpEnd(pid, imp, v ? new Date(v).toISOString() : null)}
+              placeholder="End"
+              className="proj-imp-date"
+            />
+          )}
+        </div>
+      </li>
+    );
+  };
 
   return (
     <div className="proj">
@@ -1247,23 +1511,40 @@ function ProjectsPanel({
         </button>
       </div>
 
-      <div className="proj-grid">
-        {openProjects.map((p) => (
-          <ProjectCard
-            key={p.id}
-            project={p}
-            times={events
-              .filter((e) => e.projectId === p.id)
-              .sort((a, b) => a.startTime.localeCompare(b.startTime))}
-            onPatch={(body) => patch(p.id, body)}
-            onDelete={() => del(p.id)}
-            refresh={refresh}
-          />
-        ))}
-        {openProjects.length === 0 && (
+      {openProjects.length === 0 ? (
+        <div className="proj-grid">
           <p className="keep-empty">No active projects. Create one above.</p>
-        )}
-      </div>
+        </div>
+      ) : (
+        <NestedSortable
+          containers={openProjects.map((p) => ({
+            id: p.id,
+            itemIds: p.improvements.map((_, i) => impId(p.id, i)),
+          }))}
+          onReorderContainers={reorderProjects}
+          onMoveItems={moveImprovements}
+          containerClassName="proj-grid"
+          containerGrid
+          zoneClassName="proj-imps"
+          renderContainer={(pid, h, body) => {
+            const p = projById(pid);
+            return p ? (
+              <ProjectCard
+                project={p}
+                handle={h}
+                improvementsSlot={body}
+                times={events
+                  .filter((e) => e.projectId === p.id)
+                  .sort((a, b) => a.startTime.localeCompare(b.startTime))}
+                onPatch={(b) => patch(p.id, b)}
+                onDelete={() => del(p.id)}
+                refresh={refresh}
+              />
+            ) : null;
+          }}
+          renderItem={(itemId, _pid, h) => impItemRow(itemId, h)}
+        />
+      )}
 
       {doneProjects.length > 0 && (
         <div className="proj-done">
@@ -1298,18 +1579,22 @@ function ProjectCard({
   onPatch,
   onDelete,
   refresh,
+  handle,
+  improvementsSlot,
 }: {
   project: Project;
   times: Event[];
   onPatch: (body: object) => void;
   onDelete: () => void;
   refresh: () => void;
+  handle?: DragHandle;
+  // The drag-wired improvements list (from the panel's NestedSortable) for OPEN
+  // projects. Completed projects pass none → a read-only static list.
+  improvementsSlot?: React.ReactNode;
 }) {
   const [editingTitle, setEditingTitle] = useState(false);
   const [titleDraft, setTitleDraft] = useState(project.title);
   const [newImp, setNewImp] = useState("");
-  const [editIdx, setEditIdx] = useState<number | null>(null);
-  const [impDraft, setImpDraft] = useState("");
   const [showTime, setShowTime] = useState(false);
   const [start, setStart] = useState("");
   const [end, setEnd] = useState("");
@@ -1324,10 +1609,6 @@ function ProjectCard({
     const s = impStartIso(impTimes[imp]);
     return s ? toLocalInput(new Date(s)) : "";
   };
-  const impEndInput = (imp: string) => {
-    const e = impEndIso(impTimes[imp]);
-    return e ? toLocalInput(new Date(e)) : "";
-  };
 
   const saveTitle = () => {
     setEditingTitle(false);
@@ -1338,51 +1619,6 @@ function ProjectCard({
     if (!newImp.trim()) return;
     onPatch({ improvements: [...improvements, newImp.trim()] });
     setNewImp("");
-  };
-  const saveImp = (idx: number) => {
-    setEditIdx(null);
-    const next = improvements.slice();
-    if (!impDraft.trim()) return;
-    const oldText = next[idx];
-    const newText = impDraft.trim();
-    next[idx] = newText;
-    const body: { improvements: string[]; improvementTimes?: Record<string, ImpTime> } = {
-      improvements: next,
-    };
-    // Keep the scheduled time attached when the text is renamed.
-    if (oldText !== newText && impTimes[oldText]) {
-      const t = { ...impTimes };
-      t[newText] = t[oldText];
-      delete t[oldText];
-      body.improvementTimes = t;
-    }
-    onPatch(body);
-  };
-  const delImp = (idx: number) => {
-    const removed = improvements[idx];
-    const t = { ...impTimes };
-    delete t[removed];
-    onPatch({ improvements: improvements.filter((_, i) => i !== idx), improvementTimes: t });
-  };
-  // Set the start of an improvement's scheduled time. Clearing the start removes
-  // the whole schedule (an end with no start makes no sense).
-  const setImpStart = (imp: string, iso: string | null) => {
-    const t = { ...impTimes };
-    if (iso) {
-      const prevEnd = impEndIso(t[imp]);
-      t[imp] = prevEnd ? { start: iso, end: prevEnd } : { start: iso };
-    } else {
-      delete t[imp];
-    }
-    onPatch({ improvementTimes: t });
-  };
-  // Set/clear the end of an improvement's scheduled time (no-op without a start).
-  const setImpEnd = (imp: string, iso: string | null) => {
-    const start = impStartIso(impTimes[imp]);
-    if (!start) return;
-    const t = { ...impTimes };
-    t[imp] = iso ? { start, end: iso } : { start };
-    onPatch({ improvementTimes: t });
   };
   const addTime = () => {
     if (!start) return;
@@ -1431,8 +1667,17 @@ function ProjectCard({
   };
 
   return (
-    <div className={`proj-card${project.done ? " is-done" : ""}`}>
+    <div
+      ref={handle?.setNodeRef}
+      style={handle?.style}
+      className={`proj-card${project.done ? " is-done" : ""}`}
+    >
       <div className="proj-card-head">
+        {handle && (
+          <span className="drag-grip" {...handle.handleProps} title="Drag to reorder" aria-label="Drag project">
+            ⠿
+          </span>
+        )}
         <button
           className={`todo-check${project.done ? " on" : ""}`}
           title={project.done ? "Reopen project" : "Mark project complete"}
@@ -1470,60 +1715,31 @@ function ProjectCard({
         </button>
       </div>
 
-      <ul className="proj-imps">
-        {improvements.map((imp, idx) => (
-          <li key={idx} className="proj-imp">
-            <div className="proj-imp-main">
-              {editIdx === idx ? (
-                <input
-                  autoFocus
-                  className="proj-imp-edit"
-                  value={impDraft}
-                  onChange={(e) => setImpDraft(e.target.value)}
-                  onBlur={() => saveImp(idx)}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter") saveImp(idx);
-                    if (e.key === "Escape") setEditIdx(null);
-                  }}
-                />
-              ) : (
-                <span
-                  className="proj-imp-text"
-                  title="click to edit"
-                  onClick={() => {
-                    setEditIdx(idx);
-                    setImpDraft(imp);
-                  }}
-                >
-                  {imp}
-                </span>
-              )}
-              <button className="icon-x" onClick={() => delImp(idx)} title="Delete">
-                ✕
-              </button>
-            </div>
-            <div className="proj-imp-dates">
-              <DateField
-                value={impStartInput(imp)}
-                onChange={(v) => setImpStart(imp, v ? new Date(v).toISOString() : null)}
-                placeholder="Start"
-                className="proj-imp-date"
-              />
-              {impStartInput(imp) && (
-                <DateField
-                  value={impEndInput(imp)}
-                  onChange={(v) => setImpEnd(imp, v ? new Date(v).toISOString() : null)}
-                  placeholder="End"
-                  className="proj-imp-date"
-                />
-              )}
-            </div>
-          </li>
-        ))}
-        {improvements.length === 0 && (
+      {improvements.length === 0 ? (
+        <ul className="proj-imps">
           <li className="proj-imp-empty">No improvements yet.</li>
-        )}
-      </ul>
+        </ul>
+      ) : improvementsSlot ? (
+        improvementsSlot
+      ) : (
+        // Completed projects: read-only list (reopen the project to edit/reorder).
+        <ul className="proj-imps">
+          {improvements.map((imp, idx) => (
+            <li key={idx} className="proj-imp">
+              <div className="proj-imp-main">
+                <span className="proj-imp-text">{imp}</span>
+              </div>
+              {impStartInput(imp) && (
+                <div className="proj-imp-dates">
+                  <span className="proj-imp-date">
+                    🗓 {impStartInput(imp).replace("T", " ")}
+                  </span>
+                </div>
+              )}
+            </li>
+          ))}
+        </ul>
+      )}
 
       <div className="proj-imp-add">
         <input

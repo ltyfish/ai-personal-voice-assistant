@@ -6,7 +6,12 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 export async function GET() {
-  const rows = await db.select().from(tasks).orderBy(asc(tasks.dueDate));
+  // Manual drag-order (position) is authoritative; createdAt breaks ties for
+  // brand-new rows that share the default position.
+  const rows = await db
+    .select()
+    .from(tasks)
+    .orderBy(asc(tasks.position), asc(tasks.createdAt));
   return NextResponse.json(rows);
 }
 

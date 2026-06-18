@@ -288,7 +288,7 @@
    ═══════════════════════════════════════════════ */
 .main-content {
   flex:1; padding:1.5rem 1.75rem;
-  overflow-y:auto;
+  overflow-y:auto; overflow-x:hidden; min-width:0;
 }
 
 .view { display:none; }
@@ -1975,8 +1975,9 @@
   letter-spacing:.34em; color:var(--t2); margin-bottom:1rem;
 }
 .boot-log {
-  list-style:none; font-family:var(--font-mono);
+  list-style:none; font-family:var(--font-mono); text-align:center;
   font-size:.72rem; color:var(--t2); min-height:9.5em; width:min(86vw, 360px);
+  padding:0; margin:0;
 }
 .boot-log li { padding:.12rem 0; animation:boot-line .25s ease both; white-space:nowrap; }
 .boot-log li.ok { color:var(--a); text-shadow:0 0 10px var(--a-glow); }
@@ -2565,4 +2566,29 @@ input[type="range"].deck-range {
 
   /* Project improvement grids already collapse at 600px; keep titles from clipping. */
   .proj-imp-main { flex-wrap:wrap; }
+}
+
+/* ───────────────────────── Drag handles (reorder) ───────────────────────── */
+/* The ⠿ grip that arms a drag in the SortableList / MultiSortable lists. Kept
+   subtle until hover; on touch the whole grip is the drag target (touch-action
+   none is set inline by the dnd handle so the page doesn't scroll mid-drag). */
+.drag-grip {
+  flex-shrink:0;
+  display:inline-flex; align-items:center; justify-content:center;
+  width:22px; min-width:22px; height:26px;
+  color:var(--t3); font-size:1rem; line-height:1;
+  cursor:grab; border-radius:6px;
+  opacity:.55; transition:opacity .15s ease, background .15s ease, color .15s ease;
+  -webkit-user-select:none; user-select:none;
+}
+.drag-grip.sm { width:18px; min-width:18px; height:22px; font-size:.85rem; }
+/* Note cards: grip sits in a top row beside the (optional) date chip. */
+.keep-card-head { display:flex; align-items:center; justify-content:space-between; gap:.5rem; margin-bottom:.25rem; }
+.keep-card-head .drag-grip { margin:-2px -4px -2px 0; }
+.drag-grip:hover { opacity:1; color:var(--t1); background:var(--bg2); }
+.drag-grip:active { cursor:grabbing; }
+/* Slightly bigger touch target on phones so the grip is easy to grab. */
+@media (max-width:640px) {
+  .drag-grip { width:28px; min-width:28px; height:30px; opacity:.7; }
+  .drag-grip.sm { width:24px; min-width:24px; height:26px; }
 }

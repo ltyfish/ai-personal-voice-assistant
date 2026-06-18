@@ -85,6 +85,9 @@ export default function ModelHud() {
   // Below this width we dock it as a bottom sheet: full-width, capped height, no
   // drag/resize, collapsed by default so it never hides the orb.
   const [mobile, setMobile] = useState(false);
+  // Once the user drags the mobile dock, it becomes a free-floating pad (like
+  // desktop) instead of the docked bottom sheet.
+  const [mobileFloat, setMobileFloat] = useState(false);
   useEffect(() => {
     const mq = window.matchMedia("(max-width: 760px)");
     const apply = () => setMobile(mq.matches);
@@ -210,12 +213,20 @@ export default function ModelHud() {
     }
   }
 
-  // Pointer-drag the pad by its header; persist the final position.
+  // Pointer-drag the pad by its header; persist the final position. Pointer
+  // events cover touch, so this works on phones too — the first drag pops the
+  // mobile dock out of its bottom-sheet into a free-floating pad.
   const onPointerDown = (e: React.PointerEvent) => {
-    if (mobile) return; // docked bottom sheet — no dragging
     const el = padRef.current;
     if (!el) return;
     const rect = el.getBoundingClientRect();
+    if (mobile && !mobileFloat) {
+      // Start the float exactly where the docked sheet was, so it doesn't jump.
+      setHudPos(rect.left, rect.top);
+      setMobileFloat(true);
+    }
+    el.style.right = "";
+    el.style.bottom = "";
     drag.current = { dx: e.clientX - rect.left, dy: e.clientY - rect.top };
     (e.target as HTMLElement).setPointerCapture(e.pointerId);
   };
@@ -288,7 +299,7 @@ export default function ModelHud() {
 
   const feed = rows.slice().reverse();
 
-  const containerStyle: React.CSSProperties = mobile
+  const containerStyle: React.CSSProperties = mobile && !mobileFloat
     ? {
         // Docked bottom sheet: spans the screen width, sits above the safe-area
         // inset, height grows with content up to ~55vh so it never blankets the
@@ -317,8 +328,9 @@ export default function ModelHud() {
         left: state.pos.x,
         top: state.pos.y,
         zIndex: 9000,
-        width: size.w,
-        height: collapsed ? undefined : size.h,
+        width: mobile ? "min(92vw, 340px)" : size.w,
+        height: collapsed ? undefined : mobile ? "min(60vh, 440px)" : size.h,
+        maxWidth: "calc(100vw - 16px)",
         display: "flex",
         flexDirection: "column",
         background: "var(--card, #0d1b24)",
@@ -344,7 +356,8 @@ export default function ModelHud() {
           alignItems: "center",
           gap: 6,
           padding: "6px 8px",
-          cursor: mobile ? "default" : "grab",
+          cursor: "grab",
+          touchAction: "none",
           background: `${accent}14`,
           borderBottom: `1px solid ${accent}33`,
           flexShrink: 0,

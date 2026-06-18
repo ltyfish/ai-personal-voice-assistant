@@ -9,6 +9,39 @@
 // is potentially trustworthy" rule.
 
 import type { LocalActionIntent } from "./local";
+import { relayConfigured, relayRun, type RelayRunResult } from "./relay-client";
+
+// Send an action payload (the bridge's /run shape) to the laptop. Prefer the
+// localhost bridge when we're co-located with it (desktop); if localhost is
+// unreachable but a cloud relay is configured, enqueue via the relay instead
+// (phone). Returns a uniform { httpOk, status, data } either way.
+async function runViaBridge(body: Record<string, unknown>): Promise<RelayRunResult> {
+  const token = getBridgeToken();
+  if (token) {
+    try {
+      const res = await fetch(`${getBridgeUrl()}/run`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+        body: JSON.stringify(body),
+      });
+      const data = await res.json().catch(() => ({}));
+      return { httpOk: res.ok, status: res.status, data };
+    } catch {
+      // Localhost unreachable — fall through to the relay (e.g. on the phone).
+    }
+  }
+  if (relayConfigured()) return relayRun(body);
+  return {
+    httpOk: false,
+    status: 0,
+    data: { error: "Couldn't reach the local bridge. Is it running on your laptop (npm run bridge)?" },
+  };
+}
+
+// True when SOME transport to the laptop is available (localhost token or relay).
+function bridgeReachable(): boolean {
+  return !!getBridgeToken() || relayConfigured();
+}
 
 const URL_KEY = "bridge.url";
 const TOKEN_KEY = "bridge.token";
@@ -100,65 +133,39 @@ export type ShellResult = {
 // trusts the client), so a refusal here means it hit the destructive/opaque
 // gate or developer mode is off.
 export async function runShell(command: string, cwd?: string): Promise<ShellResult> {
-  const token = getBridgeToken();
-  if (!token) {
-    return { ok: false, message: "No bridge token set. Open Bridge settings and paste the token from your laptop." };
+  if (!bridgeReachable()) {
+    return { ok: false, message: "No bridge token or relay secret set. Open Bridge settings and paste them from your laptop." };
   }
-  try {
-    const res = await fetch(`${getBridgeUrl()}/run`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${token}`,
-      },
-      body: JSON.stringify({ action: "run_shell", command, ...(cwd ? { cwd } : {}) }),
-    });
-    const data = await res.json().catch(() => ({}));
-    // A non-zero exit (compile error, missing module, a server that ran past the
-    // bridge's command timeout) comes back as HTTP 400 with stdout/stderr but no
-    // `error` field. Surface that captured output so the model can actually debug
-    // it, instead of collapsing it to a useless "Bridge error (400)".
-    const output = [data.stdout, data.stderr].filter(Boolean).join("\n").trim();
-    if (!res.ok) {
-      const reason = data.error
-        ? String(data.error)
-        : output
-        ? `Command failed${data.exitCode != null ? ` (exit ${data.exitCode})` : ""}:\n${output}`
-        : `Bridge error (${res.status}).`;
-      return { ok: false, message: reason, output };
-    }
-    return {
-      ok: true,
-      message: output ? "Command finished." : "Command finished (no output).",
-      output,
-    };
-  } catch {
-    return {
-      ok: false,
-      message: "Couldn't reach the local bridge. Is it running on your laptop (npm run bridge)?",
-    };
+  const { httpOk, status, data } = await runViaBridge({ action: "run_shell", command, ...(cwd ? { cwd } : {}) });
+  // A non-zero exit (compile error, missing module, a server that ran past the
+  // bridge's command timeout) comes back with stdout/stderr but no `error`
+  // field. Surface that captured output so the model can actually debug it,
+  // instead of collapsing it to a useless "Bridge error".
+  const output = [data?.stdout, data?.stderr].filter(Boolean).join("\n").trim();
+  if (!httpOk) {
+    const reason = data?.error
+      ? String(data.error)
+      : output
+      ? `Command failed${data?.exitCode != null ? ` (exit ${data.exitCode})` : ""}:\n${output}`
+      : `Bridge error (${status}).`;
+    return { ok: false, message: reason, output };
   }
+  return {
+    ok: true,
+    message: output ? "Command finished." : "Command finished (no output).",
+    output,
+  };
 }
 
 // ── Browser automation (Phase 2) ───────────────────────────────────────────
 // Drive the bridge's real, logged-in browser. snapshot/text are reads; act
 // performs a click/type the user has confirmed. All return the bridge's JSON
 // (with ok:false + error on failure, e.g. Playwright not installed).
-async function bridgePost(body: object): Promise<any> {
-  const token = getBridgeToken();
-  if (!token) return { ok: false, error: "No bridge token set." };
-  try {
-    const res = await fetch(`${getBridgeUrl()}/run`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-      body: JSON.stringify(body),
-    });
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok) return { ok: false, error: data.error || `Bridge error (${res.status}).` };
-    return data;
-  } catch {
-    return { ok: false, error: "Couldn't reach the local bridge. Is it running (npm run bridge)?" };
-  }
+async function bridgePost(body: Record<string, unknown>): Promise<any> {
+  if (!bridgeReachable()) return { ok: false, error: "No bridge token or relay secret set." };
+  const { httpOk, status, data } = await runViaBridge(body);
+  if (!httpOk) return { ok: false, error: data?.error || `Bridge error (${status}).` };
+  return data;
 }
 
 // Login state the bridge detects on the snapshotted page, so the UI can warn the
@@ -295,59 +302,43 @@ export type RunResult = { ok: boolean; message: string };
 export async function runLocalAction(
   intent: LocalActionIntent
 ): Promise<RunResult> {
-  const token = getBridgeToken();
-  if (!token) {
+  if (!bridgeReachable()) {
     return {
       ok: false,
       message:
-        "No bridge token set. Open Bridge settings and paste the token from your laptop.",
+        "No bridge token or relay secret set. Open Bridge settings and paste them from your laptop.",
     };
   }
-  try {
-    const res = await fetch(`${getBridgeUrl()}/run`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${token}`,
-      },
-      body: JSON.stringify({
-        action: intent.local_action,
-        target: intent.target,
-        ...(intent.fallback ? { fallback: intent.fallback } : {}),
-        ...(intent.only ? { only: intent.only } : {}),
-        ...(intent.autoSend ? { autoSend: true } : {}),
-        // So the bridge can fall back to opening a FOLDER by this name under the
-        // user's configured default folder (e.g. "open internship orders").
-        ...(getUserProfile() ? { searchFolder: getUserProfile() } : {}),
-      }),
-    });
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok) {
-      return { ok: false, message: data.error || `Bridge error (${res.status}).` };
-    }
-    // WhatsApp: the bridge opened the chat with the message typed; it either
-    // auto-pressed Enter or left it for the user to send.
-    if (intent.local_action === "whatsapp_send") {
-      return {
-        ok: true,
-        message: data.autoSend
-          ? `Sending your ${intent.label} message…`
-          : `Opened ${intent.label} with the message ready — press Enter to send.`,
-      };
-    }
-    // The bridge tells us what it actually opened (app / folder / website).
-    if (data.opened === "website") {
-      return { ok: true, message: `${intent.label} isn't installed — opening it in your browser.` };
-    }
-    if (data.opened === "folder") {
-      return { ok: true, message: `Opening the ${intent.label} folder.` };
-    }
-    return { ok: true, message: `Opening ${intent.label}.` };
-  } catch {
+  const { httpOk, status, data } = await runViaBridge({
+    action: intent.local_action,
+    target: intent.target,
+    ...(intent.fallback ? { fallback: intent.fallback } : {}),
+    ...(intent.only ? { only: intent.only } : {}),
+    ...(intent.autoSend ? { autoSend: true } : {}),
+    // So the bridge can fall back to opening a FOLDER by this name under the
+    // user's configured default folder (e.g. "open internship orders"). On the
+    // phone this may be empty; the bridge then uses its own home dir.
+    ...(getUserProfile() ? { searchFolder: getUserProfile() } : {}),
+  });
+  if (!httpOk) {
+    return { ok: false, message: data?.error || `Bridge error (${status}).` };
+  }
+  // WhatsApp: the bridge opened the chat with the message typed; it either
+  // auto-pressed Enter or left it for the user to send.
+  if (intent.local_action === "whatsapp_send") {
     return {
-      ok: false,
-      message:
-        "Couldn't reach the local bridge. Is it running on your laptop (npm run bridge)?",
+      ok: true,
+      message: data.autoSend
+        ? `Sending your ${intent.label} message…`
+        : `Opened ${intent.label} with the message ready — press Enter to send.`,
     };
   }
+  // The bridge tells us what it actually opened (app / folder / website).
+  if (data.opened === "website") {
+    return { ok: true, message: `${intent.label} isn't installed — opening it in your browser.` };
+  }
+  if (data.opened === "folder") {
+    return { ok: true, message: `Opening the ${intent.label} folder.` };
+  }
+  return { ok: true, message: `Opening ${intent.label}.` };
 }

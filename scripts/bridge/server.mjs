@@ -1725,6 +1725,58 @@ function authed(req) {
   return token && token === TOKEN;
 }
 
+// Run one action payload (the same shape /run accepts) through the local
+// handlers, returning a result object. Shared by the /run HTTP endpoint AND the
+// cloud relay loop, so a command from the phone goes through the EXACT same
+// safety gates (run_shell's inspectShell, validTarget, etc.) as a desktop one.
+async function dispatchAction(body) {
+  let result;
+  try {
+    if (body.action === "open") result = openTarget(String(body.target || ""));
+    else if (body.action === "whatsapp_send")
+      result = whatsAppSend(String(body.target || ""), !!body.autoSend);
+    else if (body.action === "open_app")
+      result = openApp(
+        String(body.target || ""),
+        body.fallback ? String(body.fallback) : null,
+        body.searchFolder ? String(body.searchFolder) : null,
+        body.only === "app" || body.only === "folder" ? body.only : undefined
+      );
+    else if (body.action === "run_shell") {
+      if (!shellEnabled)
+        result = { ok: false, error: "developer mode is off (start the bridge with BRIDGE_ALLOW_SHELL=1)" };
+      else result = await runShell(String(body.command || ""), body.cwd ? String(body.cwd) : undefined);
+    }
+    // Browser automation: drive a real, logged-in browser on this machine.
+    // Snapshot/text are reads; page_act performs a confirmed click/type.
+    else if (body.action === "page_open") {
+      result = await pageOpen(String(body.target || ""));
+    } else if (body.action === "page_snapshot") {
+      result = await pageSnapshot(body.target ? String(body.target) : undefined);
+    } else if (body.action === "page_text") {
+      result = await pageText(body.target ? String(body.target) : undefined);
+    } else if (body.action === "page_scroll") {
+      result = await pageScroll(
+        String(body.direction || "down"),
+        body.amount != null ? Number(body.amount) : undefined
+      );
+    } else if (body.action === "page_act") {
+      result = await pageAct(
+        String(body.act || ""),
+        body.ref != null ? String(body.ref) : undefined,
+        body.text != null ? String(body.text) : undefined
+      );
+    } else result = { ok: false, error: `unsupported action "${body.action}"` };
+  } catch (e) {
+    // Never let a handler error become an unhandled rejection that crashes the
+    // bridge — report it back as a normal failure.
+    const msg = String(e?.message || e);
+    console.error(`[bridge] action "${body.action}" failed:`, msg);
+    result = { ok: false, error: msg };
+  }
+  return result;
+}
+
 const server = http.createServer((req, res) => {
   cors(req, res);
   if (req.method === "OPTIONS") return send(res, 204, {});
@@ -1776,52 +1828,7 @@ const server = http.createServer((req, res) => {
       } catch {
         return send(res, 400, { error: "invalid JSON" });
       }
-      let result;
-      try {
-      if (body.action === "open") result = openTarget(String(body.target || ""));
-      else if (body.action === "whatsapp_send")
-        result = whatsAppSend(String(body.target || ""), !!body.autoSend);
-      else if (body.action === "open_app")
-        result = openApp(
-          String(body.target || ""),
-          body.fallback ? String(body.fallback) : null,
-          body.searchFolder ? String(body.searchFolder) : null,
-          body.only === "app" || body.only === "folder" ? body.only : undefined
-        );
-      else if (body.action === "run_shell") {
-        if (!shellEnabled)
-          result = { ok: false, error: "developer mode is off (start the bridge with BRIDGE_ALLOW_SHELL=1)" };
-        else result = await runShell(String(body.command || ""), body.cwd ? String(body.cwd) : undefined);
-      }
-      // Browser automation (Phase 2): drive a real, logged-in browser on this
-      // machine. Snapshot/text are reads; page_act performs a click/type that the
-      // web app has already confirmed with the user. Errors (incl. "Playwright not
-      // installed") come back as { ok:false, error } for the UI to read out.
-      else if (body.action === "page_open") {
-        result = await pageOpen(String(body.target || ""));
-      } else if (body.action === "page_snapshot") {
-        result = await pageSnapshot(body.target ? String(body.target) : undefined);
-      } else if (body.action === "page_text") {
-        result = await pageText(body.target ? String(body.target) : undefined);
-      } else if (body.action === "page_scroll") {
-        result = await pageScroll(
-          String(body.direction || "down"),
-          body.amount != null ? Number(body.amount) : undefined
-        );
-      } else if (body.action === "page_act") {
-        result = await pageAct(
-          String(body.act || ""),
-          body.ref != null ? String(body.ref) : undefined,
-          body.text != null ? String(body.text) : undefined
-        );
-      } else result = { ok: false, error: `unsupported action "${body.action}"` };
-      } catch (e) {
-        // Never let a handler error become an unhandled rejection that crashes
-        // the bridge — report it back to the web app as a normal failure.
-        const msg = String(e?.message || e);
-        console.error(`[bridge] action "${body.action}" failed:`, msg);
-        result = { ok: false, error: msg };
-      }
+      const result = await dispatchAction(body);
       return send(res, result.ok ? 200 : 400, result);
     });
     return;
@@ -1930,6 +1937,64 @@ if (MODEL_SYNC) {
   syncRouterCooldowns();
   const cooldownWatch = setInterval(syncRouterCooldowns, MODEL_SYNC_MS);
   if (typeof cooldownWatch.unref === "function") cooldownWatch.unref();
+}
+
+// --- Cloud relay (phone → cloud → this laptop) ------------------------------
+// So your PHONE can drive this computer. The phone can't reach 127.0.0.1 and
+// Vercel can't reach this laptop, so the bridge connects OUTBOUND to the cloud:
+// it heartbeats presence (so the phone sees "computer online") and short-polls a
+// command queue, running each command through the SAME dispatchAction() the
+// local /run uses (same safety gates). Enabled only when RELAY_SECRET is set —
+// it must MATCH the RELAY_SECRET in the Vercel env. RELAY_URL defaults to the
+// deployed app (JARVIS_URL/SITE_URL). With developer mode on, this secret is a
+// remote key to the machine: keep it long, random, and off the network logs.
+const RELAY_SECRET = process.env.RELAY_SECRET || "";
+const RELAY_URL = (process.env.RELAY_URL || JARVIS_URL).replace(/\/+$/, "");
+const RELAY_POLL_MS = Number(process.env.RELAY_POLL_MS) || 1500;
+const RELAY_HEARTBEAT_MS = Number(process.env.RELAY_HEARTBEAT_MS) || 5000;
+const relayHeaders = { "Content-Type": "application/json", Authorization: `Bearer ${RELAY_SECRET}` };
+
+async function relayHeartbeat() {
+  try {
+    const apps = platform === "win32" ? getStartApps().map((a) => a.name) : [];
+    await fetchWithTimeout(`${RELAY_URL}/api/bridge/heartbeat`, {
+      method: "POST",
+      headers: relayHeaders,
+      body: JSON.stringify({
+        home: process.env.USERPROFILE || process.env.HOME || "",
+        apps,
+        shellEnabled,
+      }),
+    }, 8000);
+  } catch { /* offline / app down — try again next tick */ }
+}
+
+async function relayPoll() {
+  try {
+    const res = await fetchWithTimeout(`${RELAY_URL}/api/bridge/poll`, { headers: relayHeaders }, 8000);
+    if (!res.ok) return;
+    const data = await res.json().catch(() => ({}));
+    const cmd = data && data.command;
+    if (!cmd || !cmd.id) return;
+    console.log(`[bridge] relay command ${cmd.id}: ${cmd.body?.action}`);
+    const result = await dispatchAction(cmd.body || {});
+    await fetchWithTimeout(`${RELAY_URL}/api/bridge/result`, {
+      method: "POST",
+      headers: relayHeaders,
+      body: JSON.stringify({ id: cmd.id, ok: !!result.ok, status: result.ok ? 200 : 400, data: result }),
+    }, 8000).catch(() => {});
+  } catch { /* offline — try again next tick */ }
+}
+
+if (RELAY_SECRET) {
+  relayHeartbeat();
+  const hb = setInterval(relayHeartbeat, RELAY_HEARTBEAT_MS);
+  const poll = setInterval(relayPoll, RELAY_POLL_MS);
+  if (typeof hb.unref === "function") hb.unref();
+  if (typeof poll.unref === "function") poll.unref();
+  console.log(`[bridge] cloud relay ON → ${RELAY_URL} (your phone can drive this computer)`);
+} else {
+  console.log("[bridge] cloud relay OFF (set RELAY_SECRET to let your phone drive this computer)");
 }
 
 server.listen(PORT, HOST, () => {

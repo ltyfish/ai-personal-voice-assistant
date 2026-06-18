@@ -13,6 +13,7 @@ export async function PATCH(
   if (b.title !== undefined) patch.title = b.title;
   if (b.body !== undefined) patch.body = b.body;
   if (b.date !== undefined) patch.date = b.date ? new Date(b.date) : null;
+  if (b.position !== undefined) patch.position = b.position;
 
   const [row] = await db
     .update(notes)

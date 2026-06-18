@@ -10,8 +10,8 @@ export const dynamic = "force-dynamic";
 export async function GET(req: NextRequest) {
   const taskId = req.nextUrl.searchParams.get("taskId");
   const rows = taskId
-    ? await db.select().from(subtasks).where(eq(subtasks.taskId, taskId)).orderBy(asc(subtasks.createdAt))
-    : await db.select().from(subtasks).orderBy(asc(subtasks.createdAt));
+    ? await db.select().from(subtasks).where(eq(subtasks.taskId, taskId)).orderBy(asc(subtasks.position), asc(subtasks.createdAt))
+    : await db.select().from(subtasks).orderBy(asc(subtasks.position), asc(subtasks.createdAt));
   return NextResponse.json(rows);
 }
 

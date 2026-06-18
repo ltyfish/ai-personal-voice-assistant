@@ -14,6 +14,7 @@ export async function PATCH(
   if (b.improvements !== undefined) patch.improvements = b.improvements;
   if (b.improvementTimes !== undefined) patch.improvementTimes = b.improvementTimes;
   if (b.done !== undefined) patch.done = b.done;
+  if (b.position !== undefined) patch.position = b.position;
 
   const [row] = await db
     .update(projects)

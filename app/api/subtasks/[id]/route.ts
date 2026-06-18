@@ -14,6 +14,8 @@ export async function PATCH(
   if (b.done !== undefined) patch.done = b.done;
   if (b.priority !== undefined) patch.priority = b.priority;
   if (b.dueDate !== undefined) patch.dueDate = b.dueDate ? new Date(b.dueDate) : null;
+  if (b.position !== undefined) patch.position = b.position;
+  if (b.taskId !== undefined) patch.taskId = b.taskId; // move to another task
 
   const [row] = await db
     .update(subtasks)

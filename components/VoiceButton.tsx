@@ -18,6 +18,7 @@ import {
   pageAct,
 } from "@/lib/bridge";
 import type { LoginState } from "@/lib/bridge";
+import { getRelaySecret, setRelaySecret, fetchRelayPresence } from "@/lib/relay-client";
 import { LOCAL_TOOL_GROUPS, getDisabledGroups, setGroupEnabled, getEnabledLocalToolNames } from "@/lib/tool-config";
 import type { LocalActionIntent } from "@/lib/local";
 import { getModelMode } from "@/lib/local-mode";
@@ -134,6 +135,8 @@ export default function VoiceButton({ onDone }: { onDone: () => void }) {
   const [shellEnabled, setShellEnabled] = useState<boolean | null>(null);
   const [devBusy, setDevBusy] = useState(false);
   const [userProfile, setUserProfileState] = useState("");
+  const [relaySecret, setRelaySecretState] = useState("");
+  const [relayOnline, setRelayOnline] = useState<boolean | null>(null);
 
   // Local-computer presence (bridge / Ollama), polled. Used to route a
   // turn to a local backend when the user picked local/hybrid mode. Mirrored to a
@@ -1699,7 +1702,9 @@ export default function VoiceButton({ onDone }: { onDone: () => void }) {
       setBridgeUrl(getBridgeUrl());
       setBridgeTok(getBridgeToken());
       setUserProfileState(getUserProfile());
+      setRelaySecretState(getRelaySecret());
       setBridgeOk(null);
+      setRelayOnline(null);
     }
     setOpenCard(key);
   };
@@ -1890,6 +1895,36 @@ export default function VoiceButton({ onDone }: { onDone: () => void }) {
                     <input value={userProfile} onChange={(e) => setUserProfileState(e.target.value)} onBlur={() => setUserProfile(userProfile)} placeholder="C:\\Users\\You\\Downloads" className="deck-input" />
                   </div>
                 )}
+
+                {/* Phone access via the cloud relay. Lets this phone drive the
+                    computer even when it can't reach localhost: the laptop bridge
+                    (started with RELAY_SECRET) heartbeats the cloud, and commands
+                    are relayed to it. The secret must match RELAY_SECRET in Vercel
+                    + the bridge env. */}
+                <div style={{ marginTop: 14, borderTop: "1px solid var(--line)", paddingTop: 10 }}>
+                  <label className="deck-label">Phone access (cloud relay)</label>
+                  <p className="deck-hint">
+                    Drive this computer from your phone. Set the same <code>RELAY_SECRET</code> in
+                    Vercel and on the laptop bridge, then paste it here.
+                  </p>
+                  <input
+                    type="password"
+                    value={relaySecret}
+                    onChange={(e) => setRelaySecretState(e.target.value)}
+                    placeholder="paste your relay secret"
+                    className="deck-input"
+                  />
+                  <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 8 }}>
+                    <button className="deck-btn" onClick={() => { setRelaySecret(relaySecret); setRelayOnline(null); }}>Save</button>
+                    <button className="deck-btn ghost" onClick={async () => {
+                      setRelaySecret(relaySecret);
+                      const p = await fetchRelayPresence();
+                      setRelayOnline(p.online);
+                    }}>Check computer</button>
+                    {relayOnline === true && <span style={{ color: "#5fd39a" }}>● computer online</span>}
+                    {relayOnline === false && <span style={{ color: "var(--t2)" }}>○ computer offline</span>}
+                  </div>
+                </div>
               </div>
             )}
           </div>
@@ -1949,7 +1984,7 @@ export default function VoiceButton({ onDone }: { onDone: () => void }) {
             className="jarvis-type-input"
             value={typed}
             onChange={(e) => setTyped(e.target.value)}
-            placeholder="…or type a command (more accurate than voice)"
+            placeholder="Type a command…"
             disabled={status === "thinking"}
           />
           <button
