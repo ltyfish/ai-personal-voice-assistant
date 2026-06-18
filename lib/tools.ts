@@ -514,7 +514,7 @@ export const toolDefs = [
     function: {
       name: "fetch_emails_now",
       description:
-        "Poll Gmail now for NEW emails and summarize them. For 'fetch/check my email now', 'any new emails'. Returns only mail since the last fetch in `emails` (sender, subject, summary, urgency). ALWAYS read the fetched emails back to the user: if new_emails is 0, say plainly 'No new emails.'; otherwise state the count THEN list each new email — its sender and subject with a one-line summary (most urgent first) — do NOT just say how many there are. For a DIGEST/SUMMARY ('what's my digest', 'today's emails'), call this AND list_emails(today_only=true) together in the same turn — fetch first, then read the result.",
+        "Poll Gmail now for NEW mail that has arrived since the last fetch. ONLY for an EXPLICIT refresh request: 'fetch/check my email now', 'any new emails'. Do NOT use this for 'what's my email', 'email digest', 'email summary', 'today's emails', or 'urgent emails' — those read EXISTING summaries, so use list_emails instead. Returns only mail since the last fetch in `emails` (sender, subject, summary, urgency). ALWAYS read the result back: if new_emails is 0, say plainly 'No new emails.'; otherwise state the count THEN list each new email — its sender and subject with a one-line summary (most urgent first).",
       parameters: { type: "object", properties: {} },
     },
   },
