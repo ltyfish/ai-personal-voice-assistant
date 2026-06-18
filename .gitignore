@@ -20,3 +20,5 @@ keyword-requests.md
 graphify-out/
 # Bridge browser profile (runtime Chrome data, never commit)
 scripts/bridge/.browser-profile/
+
+.vercel
