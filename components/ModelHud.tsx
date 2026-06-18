@@ -270,6 +270,18 @@ export default function ModelHud() {
   const accent = "var(--a)";
   const lanes: ("jarvis" | "pipeline")[] = ["jarvis", "pipeline"];
 
+  // The lane model is published by the client only when a turn RESPONSE returns
+  // (VoiceButton → publishModel). If a turn is slow or the request times out
+  // (504), the lane keeps showing "idle" even though the server is actively
+  // rotating models. The LIVE ROTATION feed is server-fed and independent, so
+  // fall back to the most-recent served model from it while a lane is busy.
+  const liveModel = (() => {
+    for (let i = rows.length - 1; i >= 0; i--) {
+      if (rows[i].kind === "served" || rows[i].kind === "tokens") return rows[i].model;
+    }
+    return "";
+  })();
+
   // Hidden → a tiny re-open chip in the corner.
   if (state.hidden) {
     return (
@@ -385,6 +397,11 @@ export default function ModelHud() {
           <div style={{ padding: 8, display: "grid", gap: 6, flexShrink: 0 }}>
             {lanes.map((src) => {
               const lane = state.lanes[src];
+              // While the JARVIS lane is working but hasn't been told its model
+              // yet, borrow the live rotation's current model so the pad never
+              // shows a bare "idle" mid-turn.
+              const shownModel =
+                lane.model || (src === "jarvis" && lane.busy ? liveModel : "");
               return (
                 <div
                   key={src}
@@ -418,11 +435,11 @@ export default function ModelHud() {
                       fontWeight: 700,
                       fontSize: 12.5,
                       marginTop: 2,
-                      color: lane.model ? "var(--text,#cfe9e6)" : "var(--border,#556)",
+                      color: shownModel ? "var(--text,#cfe9e6)" : "var(--border,#556)",
                       wordBreak: "break-all",
                     }}
                   >
-                    {lane.model ? short(lane.model) : "idle"}
+                    {shownModel ? short(shownModel) : "idle"}
                   </div>
                   {lane.detail && (
                     <div style={{ fontSize: 10, opacity: 0.65, marginTop: 1 }}>{lane.detail}</div>

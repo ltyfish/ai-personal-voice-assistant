@@ -3,7 +3,7 @@ import { readPageText, streamPageReply } from "@/lib/agent";
 import { addGroqUsage } from "@/lib/mail/blobs";
 
 export const runtime = "nodejs";
-export const maxDuration = 30;
+export const maxDuration = 60;
 
 // Summarize/read page TEXT that the LOCAL BRIDGE already extracted from a real,
 // logged-in browser (Phase 2). The server can't reach those pages itself, so the

@@ -829,6 +829,11 @@
   }
   .nav-brand { margin-right:0; font-size:.78rem; }
   .nav-more { top:.85rem; right:1rem; }
+  /* The fixed top-left "Systems online" tag is pinned at left:1.4rem and the
+     centred navbar pill grows to meet it, so on narrow screens they overlap
+     (the "S…" peeking out from behind the J.A.R.V.I.S. pill). Hide it on phones
+     — the brand pill's pulsing dot already signals the live state. */
+  .jarvis-status-fixed { display:none; }
   /* The burger now holds every tab — keep the menu on-screen and scrollable. */
   .nav-more-menu { max-height:72vh; overflow-y:auto; min-width:170px; }
   .nav-more-item { padding:.6rem .85rem; font-size:.82rem; }

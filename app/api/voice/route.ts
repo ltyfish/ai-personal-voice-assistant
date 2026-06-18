@@ -6,7 +6,10 @@ import { appendTurn } from "@/lib/continuity";
 import { addGroqUsage } from "@/lib/mail/blobs";
 
 export const runtime = "nodejs";
-export const maxDuration = 30;
+// 60s (Vercel's Hobby ceiling) gives the agent room to fail over across a few
+// models — each upstream call is capped at 15s by the router (router-config) —
+// instead of timing out at 30s with a 504.
+export const maxDuration = 60;
 
 // Accepts either an audio file (multipart) to transcribe + act on,
 // or a JSON { text } to skip STT (useful for typed testing).
