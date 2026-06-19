@@ -392,23 +392,25 @@ export default function LLMKeys() {
                   (m.enabled ? " · in auto rotation" : " · disabled");
                 return (
                   <li key={id} title={title}
-                    style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12.5,
-                      padding: "5px 9px", borderRadius: 8, border: "1px solid var(--border)",
-                      background: "var(--a-dim)", opacity: m.enabled ? 1 : 0.4 }}>
-                    <span className="mono" style={{ opacity: 0.5, width: 22 }}>{i + 1}</span>
-                    <span style={{ opacity: 0.55, fontSize: 11, width: 74 }}>{m.platform}</span>
-                    <span style={{ flex: 1, wordBreak: "break-all" }}>{m.model}</span>
-                    {m.source === "fallback" && <span style={{ fontSize: 11, color: "var(--t2)" }}>fallback</span>}
-                    {!m.hasKey && <span style={{ fontSize: 11, color: "var(--u4c)" }}>no key</span>}
-                    {m.cooledDown && <span style={{ fontSize: 11, color: "var(--u4c)" }}>⏳</span>}
-                    <span style={{ fontVariantNumeric: "tabular-nums", opacity: 0.6, minWidth: 64, textAlign: "right" }}>
-                      {m.totalTokens ? `${fmtTok(m.totalTokens)} all` : "—"}
+                    className={`llm-leader-row${m.enabled ? "" : " is-disabled"}`}>
+                    <span className="mono llm-leader-rank">{i + 1}</span>
+                    <span className="llm-leader-platform">{m.platform}</span>
+                    <span className="llm-leader-model">{m.model}</span>
+                    <span className="llm-leader-meta">
+                      {m.source === "fallback" && <span style={{ color: "var(--t2)" }}>fallback</span>}
+                      {!m.hasKey && <span style={{ color: "var(--u4c)" }}>no key</span>}
+                      {m.cooledDown && <span style={{ color: "var(--u4c)" }}>cooldown</span>}
                     </span>
-                    {!m.enabled && <span style={{ fontSize: 11, color: "var(--u4c)" }}>disabled</span>}
+                    <span className="llm-leader-tokens">
+                      {m.totalTokens ? `${fmtTok(m.totalTokens)} all` : "-"}
+                    </span>
+                    {!m.enabled && <span className="llm-disabled-label">disabled</span>}
                     <button type="button" onClick={() => setModelEnabled(m.platform, m.model, !m.enabled)}
-                      disabled={modelBusy === id} style={{ ...linkBtn, minWidth: 48, textAlign: "right" }}
+                      disabled={modelBusy === id}
+                      className={m.enabled ? "llm-action-disable" : "llm-action-enable"}
+                      style={{ ...linkBtn, minWidth: 74, textAlign: "center" }}
                       title={m.enabled ? "Disable in auto rotation" : "Enable in auto rotation"}>
-                      {modelBusy === id ? "..." : m.enabled ? "disable" : "enable"}
+                      {modelBusy === id ? "..." : m.enabled ? "Disable" : "Enable"}
                     </button>
                   </li>
                 );
@@ -503,25 +505,26 @@ export default function LLMKeys() {
                     (m.enabled ? " Included in auto rotation." : " Disabled: skipped by auto rotation.");
                   return (
                     <div key={m.model} title={title}
-                      style={{ display: "flex", alignItems: "center", gap: 10, padding: "3px 6px", fontSize: 12.5,
-                        opacity: m.enabled ? (m.totalTokens ? 1 : 0.7) : 0.38, flexWrap: "wrap" }}>
-                      <span style={{ flex: "1 1 0", minWidth: "4em", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{m.model}</span>
-                      {m.source === "fallback" && <span style={{ fontSize: 11, color: "var(--t2)" }}>fallback</span>}
+                      className={`llm-model-row${m.enabled ? "" : " is-disabled"}${m.totalTokens ? "" : " is-unused"}`}>
+                      <span className="llm-model-name">{m.model}</span>
+                      <span className="llm-model-badges">
+                      {m.source === "fallback" && <span style={{ color: "var(--t2)" }}>fallback</span>}
                       {m.cooledDown && (
-                        <span style={{ fontSize: 11, color: "var(--u4c)" }}
+                        <span style={{ color: "var(--u4c)" }}
                           title={m.cooldownUntil ? `Cooled until ${new Date(m.cooldownUntil).toLocaleTimeString()}` : "On cooldown"}>
-                          ⏳ cooldown
+                          cooldown
                         </span>
                       )}
-                      {!m.enabled && <span style={{ fontSize: 11, color: "var(--u4c)" }}>disabled</span>}
+                      {!m.enabled && <span style={{ color: "var(--u4c)" }}>disabled</span>}
+                      </span>
                       {m.dayCap ? (
-                        <div style={{ width: 90, height: 5, borderRadius: 3, background: "var(--a-dim)", overflow: "hidden" }}
+                        <div className="llm-model-bar" style={{ background: "var(--a-dim)" }}
                           title={`${Math.round(pct)}% of today's budget used`}>
                           <div style={{ width: `${pct}%`, height: "100%",
                             background: pct >= 90 ? "var(--u5c)" : pct >= 60 ? "var(--u4c)" : "var(--t1)" }} />
                         </div>
                       ) : null}
-                      <span style={{ fontVariantNumeric: "tabular-nums", flexShrink: 0, textAlign: "right", opacity: 0.9 }}>
+                      <span className="llm-model-tokens">
                         {m.dayCap ? (
                           <>
                             <span style={{ color: "var(--t1)" }}>{fmtTok(remaining)}</span>
@@ -536,10 +539,11 @@ export default function LLMKeys() {
                         type="button"
                         onClick={() => toggleModel(m)}
                         disabled={modelBusy === modelId}
-                        style={{ ...linkBtn, minWidth: 44, textAlign: "right" }}
+                        className={m.enabled ? "llm-action-disable" : "llm-action-enable"}
+                        style={{ ...linkBtn, minWidth: 74, textAlign: "center" }}
                         title={m.enabled ? "Disable this model from auto rotation" : "Enable this model in auto rotation"}
                       >
-                        {modelBusy === modelId ? "..." : m.enabled ? "disable" : "enable"}
+                        {modelBusy === modelId ? "..." : m.enabled ? "Disable" : "Enable"}
                       </button>
                     </div>
                   );

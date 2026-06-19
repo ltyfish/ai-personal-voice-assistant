@@ -681,20 +681,24 @@ export async function warmModels(): Promise<{ warmed: string[] }> {
       .map((s) => modelById(s.id)!)
       .filter(Boolean)
       .slice(0, 2);
-    const ping = (model: ModelDef, system: string) =>
+    const ping = (model: ModelDef) =>
       createCompletion(model, {
         _jarvisWarmup: true,
         messages: [
-          { role: "system", content: system },
+          { role: "system", content: "ping" },
           { role: "user", content: "ping" },
         ],
         max_tokens: 1,
         temperature: 0,
       });
-    // Warm the ACTUAL cloud prefix (the synced behavior text, or CORE_PROMPT
-    // fallback) on the top two models, so the prompt cache primes the same bytes.
-    const core = await getCorePrompt();
-    const jobs = working.map((m) => ping(m, core));
+    // Warm-up exists to WAKE the serverless function + open the HTTP connection to
+    // the provider, so the first real turn isn't cold. We deliberately send a TINY
+    // prompt (not the full ~5k-token persona prefix): we rotate API keys per model,
+    // and provider prompt-caches are key/project-scoped (Groq has none at all), so
+    // shipping the real prefix to "prime the cache" almost never gets reused on the
+    // next key — it just burns ~5k tokens × 2 models every warm. The latency win
+    // (function + TLS) is what survives rotation, and a one-token ping gets it.
+    const jobs = working.map((m) => ping(m));
     await Promise.allSettled(jobs);
     const warmed = working.map((m) => m.id);
     console.log(`[agent] warmed models: [${warmed.join(", ") || "none"}]`);
@@ -1141,7 +1145,7 @@ async function planTurn(
   // (recent turns) and the "about me" memory block both apply to every non-preset,
   // non-allTools turn; kick them off here and await them where each is consumed.
   const memoryP =
-    !opts?.allTools && !onlyPreset && !clarify && !chat ? getMemoryBlock() : null;
+    !opts?.allTools && !onlyPreset && !clarify ? getMemoryBlock() : null;
   const convoP = !opts?.allTools && !onlyPreset ? getRecentTurns() : null;
   if (clarify) {
     systemContent = clarifyPrompt(clarify.label, clarify.options);
@@ -1149,7 +1153,10 @@ async function planTurn(
     // Keep the chat persona static (cacheable); the date is volatile, so it rides
     // the context tail like the tool path's date/snapshot.
     systemContent = CHAT_PROMPT;
-    contextContent = dateLine();
+    // Even a tool-less chat turn gets the user's "about me" facts so it can answer
+    // from them (e.g. "what's my email", a site I named) instead of feeling amnesiac.
+    const mem = memoryP ? await memoryP : "";
+    contextContent = mem.trim() ? `${dateLine()}\n\n${mem.trim()}` : dateLine();
   } else if (onlyPreset) {
     systemContent = ""; // no model tool pass — preset calls run directly below
   } else {
@@ -1254,15 +1261,18 @@ export async function runAgent(
   // page to save tokens; when off we never attach it (name-based edits get less
   // precise, but list/ref-based ones still work).
   const useSnapshot = opts?.useSnapshot !== false;
-  // Plan the turn and read model status concurrently — they're independent, so
-  // overlapping them shaves the snapshot DB reads off the critical path.
-  const [plan, status] = await Promise.all([
+  // Plan the turn, read model status, and resolve the router auto-chain all
+  // concurrently — they're independent Neon reads, so overlapping them shaves
+  // both the snapshot reads AND the chain read off the front of every turn
+  // (autoChainOrder used to run serially after this, adding a round-trip).
+  const [plan, status, auto] = await Promise.all([
     planTurn(userText, {
       userProfile: opts?.userProfile,
       useSnapshot,
       enabledTools: opts?.enabledTools,
     }),
     computeModelStatus(),
+    autoChainOrder(),
   ]);
   const {
     routed,
@@ -1293,7 +1303,7 @@ export async function runAgent(
   // no provider keys are configured. The auto catalog is already filtered to
   // enabled + available (not in cooldown) + not-disabled and ranked strongest
   // first, so its exhausted seed is empty; the loop marks daily-spent at runtime.
-  const auto = await autoChainOrder();
+  // (auto was resolved in the Promise.all above so it overlaps the plan/status reads.)
   const { models: statuses, exhaustedIds } = status;
   let order: ModelDef[];
   let exhausted: Set<string>;
@@ -1454,10 +1464,19 @@ export async function runAgent(
         });
       }
 
-      const directAfterBatch = directReply(actions);
-      if (directAfterBatch) {
-        finalReply = clampWords(directAfterBatch, maxWords);
-        break;
+      // Single-intent turns emit ALL their calls in one batch, so once every
+      // action is directly speakable (writes/confirmations with no result to
+      // summarize) we can answer straight from the results — zero gate tokens.
+      // A MULTI request (X "and" Y) must NOT short-circuit here even if this
+      // batch's tools happen to be speakable: a later part may still be undone,
+      // so it always goes through the gate, which keeps CONTINUE-ing until every
+      // part is reflected and then summarizes the whole thing.
+      if (!multi) {
+        const directAfterBatch = directReply(actions);
+        if (directAfterBatch) {
+          finalReply = clampWords(directAfterBatch, maxWords);
+          break;
+        }
       }
 
       // Gate: after each tool batch, decide cheaply whether to speak or chain.

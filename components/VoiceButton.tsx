@@ -255,8 +255,8 @@ export default function VoiceButton({ onDone }: { onDone: () => void }) {
       window.speechSynthesis.removeEventListener("voiceschanged", load);
   }, []);
 
-  // Auto-start listening on load. If the browser blocks audio until a user
-  // gesture, start on the first interaction instead.
+  // Auto-start wake-word listening on load. Keep every mic stream on the raw path
+  // so Chrome/Windows do not switch other playback into communications processing.
   useEffect(() => {
     void startListening();
     const onGesture = () => {
@@ -304,6 +304,9 @@ export default function VoiceButton({ onDone }: { onDone: () => void }) {
   // re-warm whenever the active model changes (a daily-limit rotation), so the
   // newly-active model is primed too — tracked by warmedModelRef.
   const warmedModelRef = useRef<string>("");
+  // Timestamp of the last REAL turn — a genuine request already wakes the function
+  // + TLS, so the keep-alive below skips pinging when one just ran.
+  const lastTurnAtRef = useRef<number>(0);
   const warmUp = async () => {
     try {
       await fetch("/api/voice", {
@@ -319,6 +322,24 @@ export default function VoiceButton({ onDone }: { onDone: () => void }) {
   // Warm the LLM on mount.
   useEffect(() => {
     void warmUp();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Keep-alive cadence: Vercel functions (and the open TLS connection to the
+  // provider) go cold after a few idle minutes, so the NEXT turn pays a cold
+  // start. While the tab is visible, re-warm on a ~4-minute cadence — but only
+  // when idle: a real turn within the window already warmed the path, and we
+  // never ping while hidden (no upcoming turn) to avoid burning pings in the
+  // background. 4 min stays under typical idle-shutdown windows.
+  useEffect(() => {
+    const WARM_EVERY_MS = 4 * 60_000;
+    const id = setInterval(() => {
+      if (document.visibilityState !== "visible") return;
+      // Skip if a real turn ran recently — it already woke the function.
+      if (Date.now() - lastTurnAtRef.current < WARM_EVERY_MS) return;
+      void warmUp();
+    }, WARM_EVERY_MS);
+    return () => clearInterval(id);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -566,29 +587,25 @@ export default function VoiceButton({ onDone }: { onDone: () => void }) {
   async function startRecording(auto = false) {
     if (statusRef.current !== "idle") return;
     try {
-      // For the COMMAND capture, prefer a fresh stream WITH processing on
-      // (noise suppression + auto-gain + echo cancellation). The wake engine's
-      // shared stream is deliberately raw/low-gain (good for the wake model, bad
-      // for Whisper), so a clean, gain-normalized stream transcribes much more
-      // accurately. The wake engine is paused while we record, so the brief
-      // Spotify ducking that processing causes doesn't matter here. Fall back to
-      // the shared raw stream only if opening our own fails.
+      // Keep command capture on the same raw audio path as wake-word listening.
+      // Enabling echoCancellation/noiseSuppression/autoGainControl can make
+      // Chrome/Windows duck or muffle music while Jarvis is recording.
       const shared = engineRef.current?.micStream ?? null;
       let stream: MediaStream;
       let ownStream = false;
-      try {
-        stream = await navigator.mediaDevices.getUserMedia({
-          audio: {
-            echoCancellation: true,
-            noiseSuppression: true,
-            autoGainControl: true,
-          },
-        });
-        ownStream = true;
-      } catch {
-        if (shared && shared.getAudioTracks().some((t) => t.readyState === "live")) {
-          stream = shared;
-        } else {
+      if (shared && shared.getAudioTracks().some((t) => t.readyState === "live")) {
+        stream = shared;
+      } else {
+        try {
+          stream = await navigator.mediaDevices.getUserMedia({
+            audio: {
+              echoCancellation: false,
+              noiseSuppression: false,
+              autoGainControl: false,
+            },
+          });
+          ownStream = true;
+        } catch {
           throw new Error("no mic");
         }
       }
@@ -873,6 +890,9 @@ export default function VoiceButton({ onDone }: { onDone: () => void }) {
       // Mirror the model that answered into the floating HUD (visible from any
       // tab), with the chain + which models were daily-exhausted this turn.
       const out = (data.exhausted || []) as string[];
+      // A real turn just ran — it woke the function + TLS, so the keep-alive
+      // interval can skip its next ping.
+      lastTurnAtRef.current = Date.now();
       const detail = data.usage?.total ? `${data.usage.total} tok` : "answered";
       publishModel("jarvis", data.model, detail, false);
       if (out.length) logRoute("jarvis", `out today: ${out.join(", ")}`);
@@ -1735,7 +1755,7 @@ export default function VoiceButton({ onDone }: { onDone: () => void }) {
     { key: "tools", label: "Tools", n: `${enabledGroupCount}/${LOCAL_TOOL_GROUPS.length}` },
     { key: "live", label: "Live conversation", on: liveSession },
     { key: "settings", label: "Voice & settings" },
-    { key: "bridge", label: "Bridge" },
+    { key: "bridge", label: "Cloud relay" },
   ];
 
   return (
@@ -1877,38 +1897,33 @@ export default function VoiceButton({ onDone }: { onDone: () => void }) {
 
             {openCard === "bridge" && (
               <div className="deck-card-body">
-                <h3 className="deck-card-title">Bridge</h3>
-                {mobile ? (
-                  <p className="deck-hint">
-                    Make sure <code>npm run bridge</code> is running on your laptop. This
-                    phone drives it through the cloud relay below — no token needed here.
-                  </p>
-                ) : (
-                  <>
-                    <p className="deck-hint">
-                      Run <code>npm run bridge</code> on your laptop, then paste the token
-                      here so Jarvis can open allowlisted apps.
-                    </p>
-                    <label className="deck-label">Bridge URL</label>
-                    <input value={bridgeUrl} onChange={(e) => setBridgeUrl(e.target.value)} placeholder="http://127.0.0.1:7777" className="deck-input" />
-                    <label className="deck-label">Token</label>
-                    <input value={bridgeTok} onChange={(e) => setBridgeTok(e.target.value)} placeholder="paste token from the bridge" className="deck-input" />
-                    <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 8 }}>
-                      <button className="deck-btn" onClick={() => { setBridgeConfig(bridgeUrl, bridgeTok); setBridgeOk(null); }}>Save</button>
-                      <button className="deck-btn ghost" onClick={async () => {
-                        setBridgeConfig(bridgeUrl, bridgeTok);
-                        const h = await bridgeHealth();
-                        setBridgeOk(h.ok);
-                        setShellEnabled(h.ok ? !!h.shellEnabled : null);
-                        if (h.ok && h.home && !getUserProfile()) { setUserProfileState(h.home); setUserProfile(h.home); }
-                      }}>Test</button>
-                      {bridgeOk === true && <span style={{ color: "#5fd39a" }}>● connected</span>}
-                      {bridgeOk === false && <span style={{ color: "var(--u5c)" }}>● not reachable</span>}
-                    </div>
-                  </>
-                )}
-                {(bridgeOk === true || (relayConfigured() && presence.bridge)) && (
-                  <div style={{ marginTop: 10 }}>
+                <h3 className="deck-card-title">Cloud relay</h3>
+                <p className="deck-hint">
+                  Drive this computer from anywhere — phone or browser. The laptop
+                  bridge auto-starts at login and connects out to the cloud; set the
+                  same <code>RELAY_SECRET</code> in Vercel and on the bridge, then
+                  paste it here.
+                </p>
+                <label className="deck-label">Relay secret</label>
+                <input
+                  type="password"
+                  value={relaySecret}
+                  onChange={(e) => setRelaySecretState(e.target.value)}
+                  placeholder="paste your relay secret"
+                  className="deck-input"
+                />
+                <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 8 }}>
+                  <button className="deck-btn" onClick={() => { setRelaySecret(relaySecret); setRelayOnline(null); }}>Save</button>
+                  <button className="deck-btn ghost" onClick={async () => {
+                    setRelaySecret(relaySecret);
+                    const p = await fetchRelayPresence();
+                    setRelayOnline(p.online);
+                  }}>Check computer</button>
+                  {relayOnline === true && <span style={{ color: "#5fd39a" }}>● computer online</span>}
+                  {relayOnline === false && <span style={{ color: "var(--t2)" }}>○ computer offline</span>}
+                </div>
+                {presence.bridge && (
+                  <div style={{ marginTop: 10, borderTop: "1px solid var(--line)", paddingTop: 10 }}>
                     <div className="deck-row">
                       <span>Developer mode {shellEnabled ? <span style={{ color: "var(--u4c)" }}>● ON</span> : <span style={{ color: "var(--t2)" }}>○ off</span>}</span>
                       <button className="deck-btn" disabled={devBusy} onClick={async () => {
@@ -1924,36 +1939,6 @@ export default function VoiceButton({ onDone }: { onDone: () => void }) {
                     <input value={userProfile} onChange={(e) => setUserProfileState(e.target.value)} onBlur={() => setUserProfile(userProfile)} placeholder="C:\\Users\\You\\Downloads" className="deck-input" />
                   </div>
                 )}
-
-                {/* Phone access via the cloud relay. Lets this phone drive the
-                    computer even when it can't reach localhost: the laptop bridge
-                    (started with RELAY_SECRET) heartbeats the cloud, and commands
-                    are relayed to it. The secret must match RELAY_SECRET in Vercel
-                    + the bridge env. */}
-                <div style={{ marginTop: 14, borderTop: "1px solid var(--line)", paddingTop: 10 }}>
-                  <label className="deck-label">Phone access (cloud relay)</label>
-                  <p className="deck-hint">
-                    Drive this computer from your phone. Set the same <code>RELAY_SECRET</code> in
-                    Vercel and on the laptop bridge, then paste it here.
-                  </p>
-                  <input
-                    type="password"
-                    value={relaySecret}
-                    onChange={(e) => setRelaySecretState(e.target.value)}
-                    placeholder="paste your relay secret"
-                    className="deck-input"
-                  />
-                  <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 8 }}>
-                    <button className="deck-btn" onClick={() => { setRelaySecret(relaySecret); setRelayOnline(null); }}>Save</button>
-                    <button className="deck-btn ghost" onClick={async () => {
-                      setRelaySecret(relaySecret);
-                      const p = await fetchRelayPresence();
-                      setRelayOnline(p.online);
-                    }}>Check computer</button>
-                    {relayOnline === true && <span style={{ color: "#5fd39a" }}>● computer online</span>}
-                    {relayOnline === false && <span style={{ color: "var(--t2)" }}>○ computer offline</span>}
-                  </div>
-                </div>
               </div>
             )}
           </div>

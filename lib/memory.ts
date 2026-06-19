@@ -126,6 +126,10 @@ export function renderMemoryMarkdown(mem: Memory): string {
   if (mem.shortcuts.length) {
     parts.push(
       "## Website shortcuts (open these by name)\n" +
+        "When I ask to open/show something that matches one of these names (e.g. my " +
+        "usage dashboard, my email, a site I named), this list WINS — open the URL " +
+        "below with browser_open instead of guessing a site or treating it as an app. " +
+        "Match loosely on meaning, not exact words.\n" +
         mem.shortcuts.map((s) => `- ${s.keyword} → ${s.url}`).join("\n")
     );
   }
