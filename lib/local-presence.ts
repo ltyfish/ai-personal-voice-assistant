@@ -7,6 +7,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { getBridgeUrl, getBridgeToken } from "./bridge";
+import { fetchRelayPresence } from "./relay-client";
 
 // `fllm`/`models` = freellmapi gateway (still used by Coding mode's chat relay).
 // Voice turns now run on JARVIS's own native tool loop, so no local "brain" probe.
@@ -25,26 +26,40 @@ const OFFLINE: LocalStatus = {
 };
 
 export async function fetchLocalStatus(): Promise<LocalStatus> {
+  // Desktop path: talk to the laptop bridge directly over localhost. This is the
+  // only transport that exposes the local "brain" (fllm/models), so we prefer it
+  // when a token is set.
   const token = getBridgeToken();
-  if (!token) return OFFLINE;
-  try {
-    const ctrl = new AbortController();
-    const timer = setTimeout(() => ctrl.abort(), 4000);
-    const res = await fetch(`${getBridgeUrl()}/local/status`, {
-      headers: { Authorization: `Bearer ${token}` },
-      signal: ctrl.signal,
-    }).finally(() => clearTimeout(timer));
-    if (!res.ok) return OFFLINE;
-    const d = await res.json();
-    return {
-      bridge: true,
-      fllm: !!d.fllm,
-      models: Array.isArray(d.models) ? d.models : [],
-      shellEnabled: !!d.shellEnabled,
-    };
-  } catch {
-    return OFFLINE;
+  if (token) {
+    try {
+      const ctrl = new AbortController();
+      const timer = setTimeout(() => ctrl.abort(), 4000);
+      const res = await fetch(`${getBridgeUrl()}/local/status`, {
+        headers: { Authorization: `Bearer ${token}` },
+        signal: ctrl.signal,
+      }).finally(() => clearTimeout(timer));
+      if (res.ok) {
+        const d = await res.json();
+        return {
+          bridge: true,
+          fllm: !!d.fllm,
+          models: Array.isArray(d.models) ? d.models : [],
+          shellEnabled: !!d.shellEnabled,
+        };
+      }
+    } catch {
+      // Localhost unreachable — fall through to the relay (e.g. on the phone).
+    }
   }
+  // Phone path: no localhost bridge, but the laptop may be reachable via the
+  // cloud relay. If it's reporting in, treat the bridge as available so the
+  // laptop tool groups (open apps, PowerShell, browser) are offered and routed
+  // through the relay. The local "brain" (fllm/models) stays laptop-only.
+  const relay = await fetchRelayPresence();
+  if (relay.online) {
+    return { bridge: true, fllm: false, models: [], shellEnabled: relay.shellEnabled };
+  }
+  return OFFLINE;
 }
 
 // Poll presence on an interval so the Local tab appears/disappears as the

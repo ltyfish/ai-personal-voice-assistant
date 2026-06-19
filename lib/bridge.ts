@@ -76,24 +76,12 @@ export function setUserProfile(p: string) {
 }
 
 // Flip developer mode (arbitrary shell) on the bridge. Returns the new state.
+// Goes through the shared bridge transport (localhost on desktop, cloud relay on
+// the phone) so the toggle works from either device.
 export async function setDevMode(enabled: boolean): Promise<{ ok: boolean; shellEnabled?: boolean }> {
-  const token = getBridgeToken();
-  if (!token) return { ok: false };
-  try {
-    const res = await fetch(`${getBridgeUrl()}/dev-mode`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${token}`,
-      },
-      body: JSON.stringify({ enabled }),
-    });
-    if (!res.ok) return { ok: false };
-    const data = await res.json();
-    return { ok: true, shellEnabled: !!data.shellEnabled };
-  } catch {
-    return { ok: false };
-  }
+  const { httpOk, data } = await runViaBridge({ action: "set_dev_mode", enabled });
+  if (!httpOk) return { ok: false };
+  return { ok: true, shellEnabled: !!data?.shellEnabled };
 }
 
 export type BridgeHealth = {

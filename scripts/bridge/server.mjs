@@ -1776,6 +1776,14 @@ async function dispatchAction(body) {
         body.searchFolder ? String(body.searchFolder) : null,
         body.only === "app" || body.only === "folder" ? body.only : undefined
       );
+    else if (body.action === "set_dev_mode") {
+      // Flip developer mode (arbitrary shell) at runtime. Same effect as the
+      // /dev-mode endpoint, but reachable through the relay so the phone can
+      // toggle it too. The relay secret / bearer token is the gate.
+      shellEnabled = !!body.enabled;
+      console.log(`[bridge] developer mode ${shellEnabled ? "ENABLED" : "disabled"} via relay/run`);
+      result = { ok: true, shellEnabled };
+    }
     else if (body.action === "run_shell") {
       if (!shellEnabled)
         result = { ok: false, error: "developer mode is off (start the bridge with BRIDGE_ALLOW_SHELL=1)" };

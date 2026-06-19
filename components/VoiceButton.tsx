@@ -18,7 +18,7 @@ import {
   pageAct,
 } from "@/lib/bridge";
 import type { LoginState } from "@/lib/bridge";
-import { getRelaySecret, setRelaySecret, fetchRelayPresence } from "@/lib/relay-client";
+import { getRelaySecret, setRelaySecret, fetchRelayPresence, relayConfigured } from "@/lib/relay-client";
 import { LOCAL_TOOL_GROUPS, getDisabledGroups, setGroupEnabled, getEnabledLocalToolNames } from "@/lib/tool-config";
 import type { LocalActionIntent } from "@/lib/local";
 import { getModelMode } from "@/lib/local-mode";
@@ -145,6 +145,9 @@ export default function VoiceButton({ onDone }: { onDone: () => void }) {
   const presenceRef = useRef(presence);
   useEffect(() => {
     presenceRef.current = presence;
+    // On the phone (no localhost Test), seed the developer-mode indicator from
+    // what the laptop reports through the relay, so the toggle shows real state.
+    if (bridgeOk !== true && presence.bridge) setShellEnabled(presence.shellEnabled);
   }, [presence]);
 
   // Native toolset picker (LOCAL AI panel): which capability groups JARVIS may
@@ -1884,7 +1887,7 @@ export default function VoiceButton({ onDone }: { onDone: () => void }) {
                   {bridgeOk === true && <span style={{ color: "#5fd39a" }}>● connected</span>}
                   {bridgeOk === false && <span style={{ color: "var(--u5c)" }}>● not reachable</span>}
                 </div>
-                {bridgeOk === true && (
+                {(bridgeOk === true || (relayConfigured() && presence.bridge)) && (
                   <div style={{ marginTop: 10 }}>
                     <div className="deck-row">
                       <span>Developer mode {shellEnabled ? <span style={{ color: "var(--u4c)" }}>● ON</span> : <span style={{ color: "var(--t2)" }}>○ off</span>}</span>
