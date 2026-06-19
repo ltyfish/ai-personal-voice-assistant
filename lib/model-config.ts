@@ -5,13 +5,17 @@
 import { and, eq } from "drizzle-orm";
 import { db, mailKv } from "@/db";
 import { MODEL_IDS } from "./models";
+import { ttlCache } from "./ttl-cache";
 
 const NS = "models";
 const KEY = "config";
 
 export type ModelConfig = { disabled: string[] };
 
-export async function getModelConfig(): Promise<ModelConfig> {
+// The disabled set changes only when the user toggles a model on the deck
+// (saveModelConfig busts the cache). It's read several times per routed turn
+// (autoChain + configDisabledRouterIds), so memoizing it removes those Neon hops.
+const configCache = ttlCache(async (): Promise<ModelConfig> => {
   const rows = await db
     .select({ value: mailKv.value })
     .from(mailKv)
@@ -21,6 +25,10 @@ export async function getModelConfig(): Promise<ModelConfig> {
     ? v!.disabled.filter((id) => MODEL_IDS.includes(id))
     : [];
   return { disabled };
+}, 30_000);
+
+export async function getModelConfig(): Promise<ModelConfig> {
+  return configCache.get();
 }
 
 export async function saveModelConfig(input: { disabled?: string[] }): Promise<ModelConfig> {
@@ -34,5 +42,6 @@ export async function saveModelConfig(input: { disabled?: string[] }): Promise<M
       target: [mailKv.namespace, mailKv.key],
       set: { value: { disabled } as object, updatedAt: new Date() },
     });
+  configCache.bust();
   return { disabled };
 }

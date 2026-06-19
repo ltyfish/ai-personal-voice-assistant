@@ -6,6 +6,7 @@
 
 import { and, eq } from "drizzle-orm";
 import { db, mailKv } from "@/db";
+import { ttlCache } from "./ttl-cache";
 
 const NS = "router";
 const KEY = "config";
@@ -82,7 +83,10 @@ function normalize(v: Partial<RouterConfig> | null): RouterConfig {
   };
 }
 
-export async function getRouterConfig(): Promise<RouterConfig> {
+// Short per-instance cache: the config changes only when the user moves a slider
+// (saveRouterConfig busts it), so a few seconds of staleness saves a Neon hop on
+// every routed turn.
+const configCache = ttlCache(async (): Promise<RouterConfig> => {
   try {
     const rows = await db
       .select({ value: mailKv.value })
@@ -93,6 +97,10 @@ export async function getRouterConfig(): Promise<RouterConfig> {
     // Never let a config read break routing — fall back to defaults.
     return { ...ROUTER_DEFAULTS };
   }
+}, 30_000);
+
+export async function getRouterConfig(): Promise<RouterConfig> {
+  return configCache.get();
 }
 
 export async function saveRouterConfig(input: Partial<RouterConfig>): Promise<RouterConfig> {
@@ -113,5 +121,6 @@ export async function saveRouterConfig(input: Partial<RouterConfig>): Promise<Ro
       target: [mailKv.namespace, mailKv.key],
       set: { value: cfg as object, updatedAt: new Date() },
     });
+  configCache.bust();
   return cfg;
 }

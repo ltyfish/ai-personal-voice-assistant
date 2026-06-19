@@ -12,13 +12,15 @@
 
 import { and, eq } from "drizzle-orm";
 import { db, mailKv } from "@/db";
+import { ttlCache } from "./ttl-cache";
 
 const NS = "behavior";
 const KEY = "prompt";
 
-// The current behavior text from the DB, or "" if none is stored yet (the caller
-// falls back to its built-in default). Best-effort: a DB error never breaks a turn.
-export async function getBehavior(): Promise<string> {
+// Short per-instance cache. The persona text changes only when the local instance
+// syncs an edited behavior.md (saveBehavior busts it), but the cloud loop reads it
+// on every turn (getCorePrompt) — so memoizing it removes a Neon hop per turn.
+const behaviorCache = ttlCache(async (): Promise<string> => {
   try {
     const rows = await db
       .select({ value: mailKv.value })
@@ -30,6 +32,12 @@ export async function getBehavior(): Promise<string> {
   } catch {
     return "";
   }
+}, 30_000);
+
+// The current behavior text from the DB, or "" if none is stored yet (the caller
+// falls back to its built-in default). Best-effort: a DB error never breaks a turn.
+export async function getBehavior(): Promise<string> {
+  return behaviorCache.get();
 }
 
 // Push the behavior text to the DB so the cloud path reads it. Called by the local
@@ -45,4 +53,5 @@ export async function saveBehavior(text: string): Promise<void> {
       target: [mailKv.namespace, mailKv.key],
       set: { value: { text: t }, updatedAt: new Date() },
     });
+  behaviorCache.bust();
 }

@@ -150,6 +150,17 @@ export default function VoiceButton({ onDone }: { onDone: () => void }) {
     if (bridgeOk !== true && presence.bridge) setShellEnabled(presence.shellEnabled);
   }, [presence]);
 
+  // Phones can't reach the laptop's localhost, so the BRIDGE URL/TOKEN fields are
+  // meaningless there — hide them and drive the laptop through the cloud relay.
+  const [mobile, setMobile] = useState(false);
+  useEffect(() => {
+    const mq = window.matchMedia("(max-width: 760px)");
+    const apply = () => setMobile(mq.matches);
+    apply();
+    mq.addEventListener("change", apply);
+    return () => mq.removeEventListener("change", apply);
+  }, []);
+
   // Native toolset picker (LOCAL AI panel): which capability groups JARVIS may
   // use. Stored client-side; sent with every turn so disabled groups stay out of
   // the model schema even when a local failure falls back to cloud.
@@ -1867,26 +1878,35 @@ export default function VoiceButton({ onDone }: { onDone: () => void }) {
             {openCard === "bridge" && (
               <div className="deck-card-body">
                 <h3 className="deck-card-title">Bridge</h3>
-                <p className="deck-hint">
-                  Run <code>npm run bridge</code> on your laptop, then paste the token
-                  here so Jarvis can open allowlisted apps.
-                </p>
-                <label className="deck-label">Bridge URL</label>
-                <input value={bridgeUrl} onChange={(e) => setBridgeUrl(e.target.value)} placeholder="http://127.0.0.1:7777" className="deck-input" />
-                <label className="deck-label">Token</label>
-                <input value={bridgeTok} onChange={(e) => setBridgeTok(e.target.value)} placeholder="paste token from the bridge" className="deck-input" />
-                <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 8 }}>
-                  <button className="deck-btn" onClick={() => { setBridgeConfig(bridgeUrl, bridgeTok); setBridgeOk(null); }}>Save</button>
-                  <button className="deck-btn ghost" onClick={async () => {
-                    setBridgeConfig(bridgeUrl, bridgeTok);
-                    const h = await bridgeHealth();
-                    setBridgeOk(h.ok);
-                    setShellEnabled(h.ok ? !!h.shellEnabled : null);
-                    if (h.ok && h.home && !getUserProfile()) { setUserProfileState(h.home); setUserProfile(h.home); }
-                  }}>Test</button>
-                  {bridgeOk === true && <span style={{ color: "#5fd39a" }}>● connected</span>}
-                  {bridgeOk === false && <span style={{ color: "var(--u5c)" }}>● not reachable</span>}
-                </div>
+                {mobile ? (
+                  <p className="deck-hint">
+                    Make sure <code>npm run bridge</code> is running on your laptop. This
+                    phone drives it through the cloud relay below — no token needed here.
+                  </p>
+                ) : (
+                  <>
+                    <p className="deck-hint">
+                      Run <code>npm run bridge</code> on your laptop, then paste the token
+                      here so Jarvis can open allowlisted apps.
+                    </p>
+                    <label className="deck-label">Bridge URL</label>
+                    <input value={bridgeUrl} onChange={(e) => setBridgeUrl(e.target.value)} placeholder="http://127.0.0.1:7777" className="deck-input" />
+                    <label className="deck-label">Token</label>
+                    <input value={bridgeTok} onChange={(e) => setBridgeTok(e.target.value)} placeholder="paste token from the bridge" className="deck-input" />
+                    <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 8 }}>
+                      <button className="deck-btn" onClick={() => { setBridgeConfig(bridgeUrl, bridgeTok); setBridgeOk(null); }}>Save</button>
+                      <button className="deck-btn ghost" onClick={async () => {
+                        setBridgeConfig(bridgeUrl, bridgeTok);
+                        const h = await bridgeHealth();
+                        setBridgeOk(h.ok);
+                        setShellEnabled(h.ok ? !!h.shellEnabled : null);
+                        if (h.ok && h.home && !getUserProfile()) { setUserProfileState(h.home); setUserProfile(h.home); }
+                      }}>Test</button>
+                      {bridgeOk === true && <span style={{ color: "#5fd39a" }}>● connected</span>}
+                      {bridgeOk === false && <span style={{ color: "var(--u5c)" }}>● not reachable</span>}
+                    </div>
+                  </>
+                )}
                 {(bridgeOk === true || (relayConfigured() && presence.bridge)) && (
                   <div style={{ marginTop: 10 }}>
                     <div className="deck-row">

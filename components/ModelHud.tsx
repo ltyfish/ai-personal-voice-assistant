@@ -166,6 +166,7 @@ export default function ModelHud() {
     setRows((prev) => {
       const next = prev.slice();
       for (const e of events) {
+        if (e.detail === "warmup") continue;
         if (e.id <= minIdRef.current) continue; // dropped by a clear
         if (e.kind === "tokens") {
           const idx = findPendingServed(next, e.model, e.key);

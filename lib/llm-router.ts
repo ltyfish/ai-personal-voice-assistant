@@ -319,18 +319,19 @@ export function normalizeModelCooldownCatalogId(model: string): string {
 }
 
 async function filterAvailableModels(candidates: string[]): Promise<string[]> {
+  // ONE query for every active model cooldown (keyed by normalized model id),
+  // instead of a per-candidate getModelCooldown round-trip — on Neon that turned
+  // ~9 serial DB hops into 1 before the first token of every routed turn.
+  // Proactively-skipped models stay SILENT: emitting a feed/vault event for every
+  // already-cooled model on every request floods the rotation log and makes it
+  // look like the router is still trying cooled models when it isn't. Cooldowns
+  // are only surfaced when a model actually fails (in routeOne).
+  const cooled = await getActiveModelCooldowns();
   const out: string[] = [];
   for (const candidate of candidates) {
     const parsed = splitModel(candidate);
     if (!parsed) continue;
-    const cd = await getModelCooldown(parsed.platform, parsed.upstreamModel);
-    if (cd) {
-      // Proactively skipped — stay SILENT. Emitting a feed/vault event for every
-      // already-cooled model on every request floods the rotation log and makes
-      // it look like the router is still trying cooled models when it isn't.
-      // Cooldowns are only surfaced when a model actually fails (in routeOne).
-      continue;
-    }
+    if (cooled[normalizeModelCooldownId(parsed.upstreamModel)]) continue;
     out.push(candidate);
   }
   return out;
@@ -397,6 +398,7 @@ async function saveUsage(
   platform: string,
   model: string,
   usage: { prompt: number; completion: number; total: number },
+  detail?: string,
 ) {
   pushRouterEvent({
     kind: "tokens",
@@ -405,11 +407,12 @@ async function saveUsage(
     prompt: usage.prompt,
     completion: usage.completion,
     total: usage.total,
+    detail,
   });
   await recordUsage(keyId, platform, model, usage);
 }
 
-async function captureUsage(clone: Response, keyId: string, platform: string, model: string) {
+async function captureUsage(clone: Response, keyId: string, platform: string, model: string, detail?: string) {
   try {
     const text = await clone.text();
     const ct = clone.headers.get("content-type") ?? "";
@@ -429,7 +432,7 @@ async function captureUsage(clone: Response, keyId: string, platform: string, mo
       usage = usageFrom(JSON.parse(text));
     }
     if (usage) {
-      await saveUsage(keyId, platform, model, usage);
+      await saveUsage(keyId, platform, model, usage, detail);
     }
   } catch (e) {
     // Usage accounting should not break a successful model response, but it
@@ -438,10 +441,10 @@ async function captureUsage(clone: Response, keyId: string, platform: string, mo
   }
 }
 
-async function responseWithUsageCapture(res: Response, keyId: string, platform: string, model: string): Promise<Response> {
+async function responseWithUsageCapture(res: Response, keyId: string, platform: string, model: string, detail?: string): Promise<Response> {
   const ct = res.headers.get("content-type") ?? "";
   if (!ct.includes("text/event-stream") || !res.body) {
-    await captureUsage(res.clone(), keyId, platform, model);
+    await captureUsage(res.clone(), keyId, platform, model, detail);
     return res;
   }
 
@@ -478,7 +481,7 @@ async function responseWithUsageCapture(res: Response, keyId: string, platform: 
         }
         scan(decoder.decode(), true);
         controller.close();
-        if (usage) await saveUsage(keyId, platform, model, usage);
+        if (usage) await saveUsage(keyId, platform, model, usage, detail);
       } catch (e) {
         console.warn("[llm-router] stream usage capture failed:", e);
         controller.error(e);
@@ -669,6 +672,7 @@ function clampCompletionTokens(platform: string, upstreamModel: string, body: an
  */
 export async function routeChatCompletion(body: any): Promise<RouteResult> {
   const model = typeof body?.model === "string" ? body.model : "";
+  const detail = body?._jarvisWarmup === true ? "warmup" : undefined;
 
   // One shared routing config for the whole rotation. Each upstream call still
   // has a timeout, but the router walks every available key for a model before
@@ -690,7 +694,7 @@ export async function routeChatCompletion(body: any): Promise<RouteResult> {
     for (const candidate of await autoChain()) {
       const parsed = splitModel(candidate);
       if (!parsed) continue;
-      const res = await routeOne(parsed.platform, parsed.upstreamModel, body, budget);
+      const res = await routeOne(parsed.platform, parsed.upstreamModel, body, budget, detail);
       if (res.ok) {
         // A 4xx from the provider means this model rejected the request (e.g.
         // not served by these keys) — drop the response and try the next model.
@@ -716,7 +720,7 @@ export async function routeChatCompletion(body: any): Promise<RouteResult> {
       error: `model must be "<platform>/<model>" (or "auto") with a known platform. Got "${model}". Platforms: ${listPlatforms().join(", ")}`,
     };
   }
-  return routeOne(parsed.platform, parsed.upstreamModel, body, budget);
+  return routeOne(parsed.platform, parsed.upstreamModel, body, budget, detail);
 }
 
 // Route one concrete model with exhaustive per-key LRU rotation + cooldown
@@ -727,6 +731,7 @@ async function routeOne(
   upstreamModel: string,
   body: any,
   budget: Budget,
+  detail?: string,
 ): Promise<RouteResult> {
   const cfg = PROVIDERS[platform];
   const modelCooldown = await getModelCooldown(platform, upstreamModel);
@@ -766,9 +771,11 @@ async function routeOne(
     };
   }
 
+  const { _jarvisWarmup, ...cleanBody } = body ?? {};
+  void _jarvisWarmup;
   const upstreamBody = JSON.stringify(
     withUsageOnStream({
-      ...clampCompletionTokens(platform, upstreamModel, body),
+      ...clampCompletionTokens(platform, upstreamModel, cleanBody),
       model: upstreamModel,
     }),
   );
@@ -809,11 +816,11 @@ async function routeOne(
 
     if (res.ok) {
       console.log(`[llm-router] ✓ ${platform}/${upstreamModel} via key ${key.id.slice(0, 8)}`);
-      pushRouterEvent({ kind: "served", model: `${platform}/${upstreamModel}`, key: key.id.slice(0, 8), status: res.status });
+      pushRouterEvent({ kind: "served", model: `${platform}/${upstreamModel}`, key: key.id.slice(0, 8), status: res.status, detail });
       await markUsed(key.id);
       return {
         ok: true,
-        response: await responseWithUsageCapture(res, key.id, platform, upstreamModel),
+        response: await responseWithUsageCapture(res, key.id, platform, upstreamModel, detail),
       };
     }
 

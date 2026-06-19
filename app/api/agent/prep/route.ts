@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prepareTurn } from "@/lib/agent";
-import { readOllamaContextSplit, writeToolSchema, syncMemoryFile, syncBehaviorFile } from "@/lib/ollama-context";
+import { readOllamaContextSplit, writeToolSchema, syncMemoryFile, syncMemoryFileToCloud, syncBehaviorFile } from "@/lib/ollama-context";
 
 export const runtime = "nodejs";
 export const maxDuration = 30;
@@ -25,12 +25,10 @@ export async function POST(req: NextRequest) {
         ? body.enabledTools.map((t: unknown) => String(t))
         : undefined,
     });
-    // Mirror the "about me" memory (cloud DB) into memory.md first, then inject
-    // the local assistant's soul + memory + recent activity (only the local server
-    // can read these files). Prepended so persona+memory frame the whole turn.
-    // Mirror "about me" (DB→file) and push the vault's behavior.md (file→DB) so the
-    // cloud path reads the SAME rules. Both best-effort; run concurrently.
-    await Promise.all([syncMemoryFile(), syncBehaviorFile()]);
+    // Push local vault edits to the cloud first (memory.md/behavior.md → DB), then
+    // mirror normalized memory back to memory.md (DB → file) before injecting it.
+    await Promise.all([syncMemoryFileToCloud(), syncBehaviorFile()]);
+    await syncMemoryFile();
     // STATIC local context (behavior + about-me) goes on TOP of the system prompt so
     // it sits in the cacheable head with the tool schema; VOLATILE context (recent
     // activity) goes at the END of the volatile tail so it doesn't poison the cache.

@@ -502,6 +502,16 @@ function speakAction(name: string, args: any, result: unknown): string | null {
         ["deleted_projects", "project"],
         ["deleted_notes", "note"],
       ]);
+    case "open_app":
+      if (r.pending && r.local_action === "open_app") {
+        return `I'll open ${String(r.label ?? args?.name ?? "that")} once you confirm.`;
+      }
+      return null;
+    case "open_url":
+      if (r.pending && r.local_action === "open") {
+        return `I'll open ${String(r.label ?? args?.site ?? "that")} once you confirm.`;
+      }
+      return null;
     default:
       return null; // lists/searches, project edits → summary pass phrases them
   }
@@ -598,7 +608,6 @@ async function systemPrompt(opts: {
       : needsSnapshot(text, groups);
   const wantHistory = /\b(undo|restore|reopen|history|completed|delete)\b/i.test(text);
   const sections = opts.toolNames ? snapshotSectionsFromTools(opts.toolNames) : null;
-  const snapshot = wantSnapshot ? await buildSnapshot(wantHistory, sections) : "";
 
   // Static prefix first (cacheable), volatile context last. CLOUD turns prepend the
   // generic CORE_PROMPT. LOCAL turns already get identity + the same GENERIC_RULES
@@ -607,7 +616,13 @@ async function systemPrompt(opts: {
   // Local turns get identity + rules from behavior.md (prepended by the prep
   // route), so add no core here. Cloud turns pull the SAME behavior text from the
   // DB (falling back to CORE_PROMPT until it's been synced).
-  const core = opts.localBrowser ? "" : await getCorePrompt();
+  // core (persona/behavior, now cached) and the data snapshot are independent
+  // Neon reads — run them together so the snapshot's queries don't sit behind the
+  // behavior read on the critical path.
+  const [core, snapshot] = await Promise.all([
+    opts.localBrowser ? Promise.resolve("") : getCorePrompt(),
+    wantSnapshot ? buildSnapshot(wantHistory, sections) : Promise.resolve(""),
+  ]);
   // The user's own "about me" facts — always read on cloud turns. (Local turns get
   // the same block via memory.md, so skip it here to avoid duplicating it.)
   const memoryBlock =
@@ -668,6 +683,7 @@ export async function warmModels(): Promise<{ warmed: string[] }> {
       .slice(0, 2);
     const ping = (model: ModelDef, system: string) =>
       createCompletion(model, {
+        _jarvisWarmup: true,
         messages: [
           { role: "system", content: system },
           { role: "user", content: "ping" },
@@ -1120,7 +1136,13 @@ async function planTurn(
 
   let systemContent: string;
   let contextContent = "";
-  // (cloud continuity is appended to contextContent after the branch below)
+  // Start the independent context reads NOW so they overlap with systemPrompt's
+  // own Neon reads instead of running serially before/after it. Cloud continuity
+  // (recent turns) and the "about me" memory block both apply to every non-preset,
+  // non-allTools turn; kick them off here and await them where each is consumed.
+  const memoryP =
+    !opts?.allTools && !onlyPreset && !clarify && !chat ? getMemoryBlock() : null;
+  const convoP = !opts?.allTools && !onlyPreset ? getRecentTurns() : null;
   if (clarify) {
     systemContent = clarifyPrompt(clarify.label, clarify.options);
   } else if (chat) {
@@ -1139,7 +1161,7 @@ async function planTurn(
       multi,
       // The user's "about me" facts (cloud injects here; local gets it via
       // memory.md). Best-effort: a DB read failure just omits the block.
-      memory: opts?.allTools ? undefined : await getMemoryBlock(),
+      memory: memoryP ? await memoryP : undefined,
       // Local all-tools mode → browser-first web access (no search tool).
       localBrowser: opts?.allTools === true,
       // Force the snapshot off when the user disabled it; otherwise keep the
@@ -1156,8 +1178,8 @@ async function planTurn(
   // Cloud short-term continuity (the LOCAL path uses activity.md via the prep route
   // instead). Appended to the END of the VOLATILE tail so it never breaks the
   // cacheable static prefix + tool schema.
-  if (!opts?.allTools && !onlyPreset) {
-    const convo = await getRecentTurns();
+  if (convoP) {
+    const convo = await convoP;
     if (convo) contextContent = contextContent ? `${contextContent}\n\n${convo}` : convo;
   }
 
@@ -1430,6 +1452,12 @@ export async function runAgent(
           // context than this, and it keeps the per-round prompt small.
           content: JSON.stringify(result).slice(0, 2000),
         });
+      }
+
+      const directAfterBatch = directReply(actions);
+      if (directAfterBatch) {
+        finalReply = clampWords(directAfterBatch, maxWords);
+        break;
       }
 
       // Gate: after each tool batch, decide cheaply whether to speak or chain.

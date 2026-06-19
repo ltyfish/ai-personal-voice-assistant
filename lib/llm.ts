@@ -20,6 +20,7 @@ export type CompletionParams = {
   tool_choice?: "auto";
   temperature?: number;
   max_tokens?: number;
+  _jarvisWarmup?: boolean;
 };
 
 export type CompletionResult = {

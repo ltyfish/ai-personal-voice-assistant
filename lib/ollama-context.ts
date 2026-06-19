@@ -24,7 +24,8 @@ import {
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { toolDefs } from "./tools";
-import { getMemory, renderMemoryMarkdown } from "./memory";
+import { getMemory, renderMemoryMarkdown, saveMemory } from "./memory";
+import { saveShortcuts, type Shortcut } from "./shortcuts";
 import { saveBehavior } from "./behavior";
 
 // Resolve the local "soul" folder so it works on every machine without a
@@ -227,6 +228,74 @@ export async function syncMemoryFile(): Promise<void> {
     writeFileSync(MEMORY, md + "\n");
   } catch {
     /* best-effort — keep whatever memory.md already has */
+  }
+}
+
+function section(md: string, heading: string): string {
+  const re = new RegExp(`^##\\s+${heading.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}[^\\n]*\\n([\\s\\S]*?)(?=^##\\s+|\\s*$)`, "im");
+  return md.match(re)?.[1]?.trim() ?? "";
+}
+
+function parseBulletLines(block: string): string[] {
+  return block
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => line.replace(/^[-*]\s+/, "").trim())
+    .filter(Boolean);
+}
+
+function parseMemoryMarkdown(md: string): {
+  shortcuts: Shortcut[];
+  logins: { host: string; username: string; password: string }[];
+  startups: { url: string; command: string }[];
+  notes: string;
+} {
+  const notes = section(md, "Notes about me");
+  const shortcuts = parseBulletLines(section(md, "Website shortcuts"))
+    .map((line) => {
+      const [keyword, ...rest] = line.split("→");
+      return { keyword: keyword.trim(), url: rest.join("→").trim() };
+    })
+    .filter((s) => s.keyword && s.url);
+  const logins = parseBulletLines(section(md, "Logins"))
+    .map((line) => {
+      const [hostRaw, restRaw = ""] = line.split("→");
+      const rest = restRaw.trim();
+      const user = rest.match(/(?:^|[·\s])user\s+([^·]+)/i)?.[1]?.trim() ?? "";
+      const pass = rest.match(/(?:^|[·\s])pass\s+([^·]+)/i)?.[1]?.trim() ?? "";
+      return { host: hostRaw.trim(), username: user, password: pass };
+    })
+    .filter((l) => l.host);
+  const startups = parseBulletLines(section(md, "Startup steps"))
+    .map((line) => {
+      const [url, ...rest] = line.split("→");
+      return { url: url.trim(), command: rest.join("→").trim() };
+    })
+    .filter((s) => s.url && s.command);
+  return { shortcuts, logins, startups, notes };
+}
+
+// Push local Obsidian edits in memory.md to the cloud DB before the normal
+// DB→file mirror runs. This mirrors syncBehaviorFile(): cloud cannot read the
+// vault, so the local server must publish the file's current contents.
+export async function syncMemoryFileToCloud(): Promise<boolean> {
+  try {
+    if (!existsSync(MEMORY)) return false;
+    const md = read(MEMORY).trim();
+    if (!md) return false;
+    const parsed = parseMemoryMarkdown(md);
+    await Promise.all([
+      saveMemory({
+        logins: parsed.logins,
+        startups: parsed.startups,
+        notes: parsed.notes,
+      }),
+      saveShortcuts(parsed.shortcuts),
+    ]);
+    return true;
+  } catch {
+    return false;
   }
 }
 

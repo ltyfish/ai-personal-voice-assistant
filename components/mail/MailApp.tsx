@@ -1341,7 +1341,7 @@ function SettingsView({
           </div>
 
           <div className="form-group" style={{ marginTop: "1rem" }}>
-            <label>Digest Times (UTC, comma-separated, e.g. 07:00, 19:00)</label>
+            <label>Digest Times (Singapore time, comma-separated, e.g. 07:00, 19:00)</label>
             <input value={digestTimes} onChange={(e) => setDigestTimes(e.target.value)} />
           </div>
 
