@@ -29,7 +29,7 @@ export async function POST(req: NextRequest) {
   try {
     const body = await req.json().catch(() => ({}));
     const id = String(body.id || "");
-    const project = getProject(id);
+    const project = await getProject(id);
     if (!project) return NextResponse.json({ error: "unknown project" }, { status: 404 });
 
     const prompt = (project.prompt || "").slice(0, 2000);

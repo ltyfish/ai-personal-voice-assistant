@@ -22,6 +22,7 @@ import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { pageOpen, pageSnapshot, pageText, pageScroll, pageAct, closeBrowser } from "./browser.mjs";
+import { startPipelinePhase, stopPipeline, isPipelineRunning } from "./pipeline.mjs";
 
 // Load the app's .env.local (project root) so the bridge can read SITE_URL etc.
 // Best-effort: a missing file just leaves process.env untouched. Shell-exported
@@ -1808,6 +1809,31 @@ async function dispatchAction(body) {
         body.ref != null ? String(body.ref) : undefined,
         body.text != null ? String(body.text) : undefined
       );
+    }
+    // Cloud-triggered pipeline phase: run the whole multi-round loop locally
+    // (native fs + shell) and stream progress to the cloud event channel. This
+    // is FIRE-AND-FORGET — a phase takes minutes, far past the relay's 90s stale
+    // window, so we ack immediately and report real progress out-of-band rather
+    // than blocking the relay poll on the full run.
+    else if (body.action === "pipeline_phase") {
+      result = startPipelinePhase(body, {
+        jarvisUrl: JARVIS_URL,
+        relayUrl: RELAY_URL,
+        relaySecret: RELAY_SECRET,
+        proxyKey: process.env.LLM_PROXY_KEY || "",
+        pageOpen, pageSnapshot, pageText, pageScroll, pageAct,
+        // Guard run_shell behind developer mode, same as the /run path — the loop
+        // can't quietly run arbitrary shell when the user has it turned off.
+        runShell: async (command, cwd) =>
+          shellEnabled
+            ? runShell(command, cwd)
+            : { ok: false, error: "developer mode is off (start the bridge with BRIDGE_ALLOW_SHELL=1)" },
+        log: (m) => console.log(m),
+      });
+    } else if (body.action === "pipeline_stop") {
+      result = { ok: stopPipeline(String(body.projectId || body.id || "")) };
+    } else if (body.action === "pipeline_status") {
+      result = { ok: true, running: isPipelineRunning(String(body.projectId || body.id || "")) };
     } else result = { ok: false, error: `unsupported action "${body.action}"` };
   } catch (e) {
     // Never let a handler error become an unhandled rejection that crashes the

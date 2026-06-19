@@ -8,7 +8,7 @@ export const runtime = "nodejs";
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json().catch(() => ({}));
-    const ok = writePhaseDoc(String(body.id || ""), String(body.phase || ""), String(body.summary || ""));
+    const ok = await writePhaseDoc(String(body.id || ""), String(body.phase || ""), String(body.summary || ""));
     return NextResponse.json({ ok });
   } catch (err: any) {
     return NextResponse.json({ error: err?.message || "failed" }, { status: 500 });

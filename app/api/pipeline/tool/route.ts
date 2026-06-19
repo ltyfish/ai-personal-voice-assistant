@@ -9,7 +9,7 @@ export const runtime = "nodejs";
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json().catch(() => ({}));
-    const project = getProject(String(body.projectId || ""));
+    const project = await getProject(String(body.projectId || ""));
     if (!project) return NextResponse.json({ error: "unknown project" }, { status: 404 });
     const result = runCodingFileTool(project.workdir, String(body.name || ""), body.args || {});
     return NextResponse.json({ result });

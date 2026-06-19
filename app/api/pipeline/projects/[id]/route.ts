@@ -14,7 +14,7 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
     if (typeof body.iteration === "number") patch.iteration = body.iteration;
     if (typeof body.planDone === "boolean") patch.planDone = body.planDone;
     if (typeof body.execDone === "boolean") patch.execDone = body.execDone;
-    const project = updateProject(id, patch);
+    const project = await updateProject(id, patch);
     if (!project) return NextResponse.json({ error: "unknown project" }, { status: 404 });
     return NextResponse.json({ project });
   } catch (err: any) {
@@ -25,7 +25,7 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
 export async function DELETE(_req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   try {
     const { id } = await params;
-    return NextResponse.json({ ok: deleteProject(id) });
+    return NextResponse.json({ ok: await deleteProject(id) });
   } catch (err: any) {
     return NextResponse.json({ error: err?.message || "failed" }, { status: 500 });
   }

@@ -56,6 +56,40 @@ export async function fetchRelayPresence(): Promise<RelayPresence> {
   }
 }
 
+// ── pipeline progress stream ─────────────────────────────────────────────────
+// A cloud-triggered pipeline phase runs on the laptop bridge and pushes progress
+// to /api/pipeline/events; the UI pulls it here (since-cursor). Same relay-secret
+// gate as the rest of the relay. Returns an empty, not-running result on any error
+// so the poller can simply stop.
+export type PipelineEventBatch = {
+  events: Array<{
+    i: number; ts: number; phase: string; team?: string; summary: string;
+    detail?: string; tool?: string; status?: string; round?: number; model?: string;
+  }>;
+  cursor: number;
+  running: boolean;
+};
+
+export async function fetchPipelineEvents(id: string, since: number): Promise<PipelineEventBatch> {
+  const empty: PipelineEventBatch = { events: [], cursor: since, running: false };
+  if (!relayConfigured() || !id) return empty;
+  try {
+    const res = await fetch(
+      `/api/pipeline/events?id=${encodeURIComponent(id)}&since=${since}`,
+      { headers: authHeaders() }
+    );
+    if (!res.ok) return empty;
+    const d = await res.json();
+    return {
+      events: Array.isArray(d.events) ? d.events : [],
+      cursor: typeof d.cursor === "number" ? d.cursor : since,
+      running: !!d.running,
+    };
+  } catch {
+    return empty;
+  }
+}
+
 export type RelayRunResult = { httpOk: boolean; status: number; data: any };
 
 // Enqueue an action for the laptop bridge and poll until it reports a result (or

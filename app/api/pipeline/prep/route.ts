@@ -134,7 +134,7 @@ export async function POST(req: NextRequest) {
     const phase = String(body.phase || "") as Phase;
     if (!PHASE_MARKER[phase]) return NextResponse.json({ error: "bad phase" }, { status: 400 });
 
-    const project = getProject(id);
+    const project = await getProject(id);
     if (!project) return NextResponse.json({ error: "unknown project" }, { status: 404 });
 
     const planFile = planFileName(project.iteration);
@@ -146,7 +146,7 @@ export async function POST(req: NextRequest) {
       workdir: project.workdir,
       planFile,
       prevPlanFile,
-      memory: readProjectMemoryTail(id),
+      memory: await readProjectMemoryTail(id),
     };
 
     let system: string;

@@ -16,6 +16,7 @@ import { loadPipelineConfig, savePipelineConfig, PIPELINE_LIMITS, type PipelineC
 import { publishModel, setIdle, logRoute } from "@/lib/model-hud";
 import { byBestModel } from "@/lib/model-rank";
 import { notify, confirmDialog } from "@/lib/toast";
+import { relayRun, fetchPipelineEvents } from "@/lib/relay-client";
 
 type Project = {
   id: string;
@@ -68,6 +69,56 @@ type UsageModel = {
   requests: number; keyCount: number; rank: number;
 };
 
+// REMOTE phase execution: when the app is served from the cloud (not a local dev
+// server), the in-browser loop can't reach the laptop's filesystem, so the phase
+// runs on the laptop BRIDGE instead. We relay a `pipeline_phase` start command and
+// stream the bridge's progress back via /api/pipeline/events, replaying each event
+// into the SAME onProgress feed so the higher-level run logic is unchanged. Returns
+// the same PhaseResult shape as runPhase so it's a drop-in at the runPhaseResilient
+// seam.
+async function runPhaseRemote(
+  projectId: string,
+  phase: Phase,
+  models: string[],
+  opts: { onProgress: (e: PipelineEvent) => void; signal?: AbortSignal; cfg: PipelineConfig }
+): Promise<{ status: "done" | "stopped" | "error" | "capped"; summary: string }> {
+  const started = await relayRun(
+    { action: "pipeline_phase", projectId, phase, models, cfg: opts.cfg },
+    { timeoutMs: 30_000 }
+  );
+  if (!started.httpOk || started.data?.started !== true) {
+    const err = String(started.data?.error || "Couldn't start the phase on your computer (is the bridge online?).");
+    opts.onProgress({ phase: "error", summary: err });
+    return { status: "error", summary: err };
+  }
+  const TERMINAL = new Set(["done", "stopped", "capped", "error"]);
+  let since = -1;
+  let result: { status: "done" | "stopped" | "error" | "capped"; summary: string } = {
+    status: "error",
+    summary: "no progress received from your computer",
+  };
+  for (;;) {
+    if (opts.signal?.aborted) {
+      relayRun({ action: "pipeline_stop", projectId }, { timeoutMs: 10_000 }).catch(() => {});
+      return { status: "stopped", summary: "Stopped." };
+    }
+    const batch = await fetchPipelineEvents(projectId, since);
+    let done = false;
+    for (const e of batch.events) {
+      since = e.i;
+      opts.onProgress(e as PipelineEvent);
+      if (TERMINAL.has(e.phase)) {
+        done = true;
+        result = { status: e.phase as typeof result.status, summary: e.summary || result.summary };
+      }
+    }
+    if (done) break;
+    if (!batch.running) break; // safety: run ended without a terminal event reaching us
+    await new Promise((r) => setTimeout(r, 1200));
+  }
+  return result;
+}
+
 export default function Pipeline({ status }: { status: LocalStatus }) {
   // ── status board (freellmapi — still drives the team model pickers) ──
   const [keys, setKeys] = useState<ProviderKey[]>([]);
@@ -94,6 +145,27 @@ export default function Pipeline({ status }: { status: LocalStatus }) {
 
   // ── which model the running phase is actually using (live) ──
   const [activeModel, setActiveModel] = useState<string>("");
+
+  // Run phases on the laptop BRIDGE whenever the app isn't served from a local dev
+  // server: the in-browser loop's file tools hit cloud routes that can't see the
+  // laptop disk, so a cloud/phone session must drive the bridge instead. On
+  // localhost (npm run dev) the original in-browser loop still works directly.
+  const remote = useMemo(
+    () =>
+      typeof window !== "undefined" &&
+      !/^(localhost|127\.|0\.0\.0\.0|\[::1\])/.test(window.location.hostname),
+    []
+  );
+  // Pick the executor for ONE phase — remote (bridge) or the local in-browser loop.
+  const runOnePhase = (
+    projectId: string,
+    phase: Phase,
+    chain: string[],
+    runOpts: { onProgress: (e: PipelineEvent) => void; signal?: AbortSignal; cfg: PipelineConfig; runningPhase?: string }
+  ) =>
+    remote
+      ? runPhaseRemote(projectId, phase, chain, runOpts)
+      : runPhase(projectId, phase, chain, runOpts);
 
   // ── projects + run state ──
   const [projects, setProjects] = useState<Project[]>([]);
@@ -262,12 +334,12 @@ export default function Pipeline({ status }: { status: LocalStatus }) {
   ) {
     const max = cfgRef.current.capContinues;
     const runOpts = { onProgress, cfg: cfgRef.current, ...opts };
-    let res = await runPhase(projectId, phase, models, runOpts);
+    let res = await runOnePhase(projectId, phase, models, runOpts);
     let cont = 0;
     while (res.status === "capped" && cont < max && !opts.signal.aborted) {
       cont++;
       onProgress({ phase: "info", summary: `Step limit hit — auto-continuing (${cont}/${max})…` });
-      res = await runPhase(projectId, phase, models, runOpts);
+      res = await runOnePhase(projectId, phase, models, runOpts);
     }
     return res;
   }
