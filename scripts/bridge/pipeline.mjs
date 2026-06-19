@@ -22,6 +22,7 @@
 import {
   readFileSync,
   writeFileSync,
+  appendFileSync,
   existsSync,
   statSync,
   readdirSync,
@@ -29,6 +30,22 @@ import {
 } from "node:fs";
 import { resolve, relative, isAbsolute, dirname, join } from "node:path";
 import { homedir } from "node:os";
+
+// Where pipeline run logs are written on the laptop — one markdown file per
+// project. Defaults to the Obsidian project-memory vault's `pipeline` folder so
+// the user can read every run in Obsidian; override with PIPELINE_LOG_DIR.
+const LOG_DIR =
+  process.env.PIPELINE_LOG_DIR ||
+  join(homedir(), "Downloads", "Projects", "Jarvis Personal AI", "pipeline");
+
+function appendPipelineLog(projectId, line) {
+  try {
+    if (!existsSync(LOG_DIR)) mkdirSync(LOG_DIR, { recursive: true });
+    appendFileSync(join(LOG_DIR, `${projectId}.md`), line.endsWith("\n") ? line : line + "\n");
+  } catch {
+    /* best-effort — never let logging break a run */
+  }
+}
 
 const MAX_FILE_BYTES = 200_000;
 const MAX_LIST = 400;
@@ -229,7 +246,17 @@ async function runPhase({ projectId, phase, models, cfg, handle }, deps) {
   function emit(e) {
     pending.push(e);
     deps.log?.(`[pipeline ${projectId.slice(0, 6)}/${phase}] ${e.phase}: ${e.summary || ""}`.slice(0, 200));
+    // Durable per-project run log in the Obsidian vault (one line per event).
+    const ts = new Date().toISOString();
+    const tool = e.tool ? ` ${e.tool}` : "";
+    const status = e.status ? ` (${e.status})` : "";
+    const detail = e.detail ? ` — ${String(e.detail).slice(0, 300)}` : "";
+    appendPipelineLog(projectId, `- ${ts} [${e.phase}${tool}]${status} ${e.summary || ""}${detail}`);
   }
+  appendPipelineLog(
+    projectId,
+    `\n## ${new Date().toISOString()} — ${team} phase started${models.length ? ` · models: ${models.join(", ")}` : ""}\n`
+  );
   const flusher = setInterval(() => void flush(), 1000);
 
   // Best-effort cloud store updates (phase pointer, memory, phase report).

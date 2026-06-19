@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prepareTurn } from "@/lib/agent";
 import { readOllamaContextSplit, writeToolSchema, syncMemoryFile, syncMemoryFileToCloud, syncBehaviorFile } from "@/lib/ollama-context";
+import { getRecentActivityBlock } from "@/lib/activity";
 
 export const runtime = "nodejs";
 export const maxDuration = 30;
@@ -32,9 +33,12 @@ export async function POST(req: NextRequest) {
     // STATIC local context (behavior + about-me) goes on TOP of the system prompt so
     // it sits in the cacheable head with the tool schema; VOLATILE context (recent
     // activity) goes at the END of the volatile tail so it doesn't poison the cache.
-    const { staticPart, volatilePart } = readOllamaContextSplit();
+    const { staticPart } = readOllamaContextSplit();
     if (staticPart) prep.system = `${staticPart}\n\n${prep.system}`;
-    if (volatilePart) prep.context = [prep.context, volatilePart].filter(Boolean).join("\n\n");
+    // Short-term recall comes from the unified `activity` DB table (shared with the
+    // cloud path), appended to the volatile tail so it never breaks the cached prefix.
+    const recall = await getRecentActivityBlock();
+    if (recall) prep.context = [prep.context, recall].filter(Boolean).join("\n\n");
     // Expose the live tool schema in Obsidian: exactly the tools sent this turn
     // are flagged enabled, so unchecking a group is visibly reflected.
     try {

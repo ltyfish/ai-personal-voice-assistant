@@ -17,7 +17,7 @@ import { computeModelStatus } from "./model-status";
 import { getMemory, renderMemoryMarkdown } from "./memory";
 import { GENERIC_RULES } from "./ollama-context";
 import { getBehavior } from "./behavior";
-import { getRecentTurns } from "./continuity";
+import { getRecentActivityBlock } from "./activity";
 
 // The user's "about me" facts as a markdown block for the cloud prompt. Best-effort
 // — a DB failure returns "" so a turn never breaks over missing memory.
@@ -1146,7 +1146,7 @@ async function planTurn(
   // non-allTools turn; kick them off here and await them where each is consumed.
   const memoryP =
     !opts?.allTools && !onlyPreset && !clarify ? getMemoryBlock() : null;
-  const convoP = !opts?.allTools && !onlyPreset ? getRecentTurns() : null;
+  const convoP = !opts?.allTools && !onlyPreset ? getRecentActivityBlock() : null;
   if (clarify) {
     systemContent = clarifyPrompt(clarify.label, clarify.options);
   } else if (chat) {

@@ -255,3 +255,25 @@ export const routerEvents = pgTable("router_events", {
 });
 
 export type RouterEventRow = typeof routerEvents.$inferSelect;
+
+// ---- Activity log ----
+// One row per assistant turn (cloud OR local): what the user said, the tools/
+// decisions the model ran, and the spoken reply. This is its OWN table (not a
+// mail_kv namespace) so it's clear and separate from settings/state/cooldowns.
+// It powers BOTH the Activity card (visible history, clearable) AND short-term
+// recall — the last few rows are injected into the next turn's prompt. Replaces
+// the old `cloud_convo` mail_kv namespace. Pruned to a recent tail.
+export const activity = pgTable("activity", {
+  id: serial("id").primaryKey(),
+  at: timestamp("at", { withTimezone: true }).notNull().defaultNow(),
+  source: text("source").notNull().default("cloud"), // "cloud" | "local"
+  userText: text("user_text").notNull().default(""),
+  reply: text("reply").notNull().default(""),
+  model: text("model"),
+  // Names of the tools called this turn (e.g. ["list_events","browser_open"]).
+  tools: jsonb("tools").$type<string[]>().notNull().default([]),
+  // The decisions behind the turn: each tool call with its arguments.
+  decisions: jsonb("decisions").$type<{ name: string; args?: unknown }[]>().notNull().default([]),
+});
+
+export type ActivityRow = typeof activity.$inferSelect;

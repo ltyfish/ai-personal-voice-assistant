@@ -364,6 +364,18 @@ export default function LLMKeys() {
         </div>
       </details>
 
+      {/* Activity — every assistant turn: what you asked, the tools/decisions it
+          ran, and its reply. Powers short-term recall and is clearable. */}
+      <details className="collapse">
+        <summary>
+          Activity
+          <span className="col-caret" />
+        </summary>
+        <div className="collapse-body">
+          <ActivityLog />
+        </div>
+      </details>
+
       {/* Model leaderboard — best→worst across every provider (the order the auto
           rotation tries them). Includes models whose provider has no key yet, so
           any model can be disabled here even before you add its key. */}
@@ -553,6 +565,101 @@ export default function LLMKeys() {
             </div>
           </details>
         ))
+      )}
+    </div>
+  );
+}
+
+// The Activity log: newest-first history of every assistant turn (cloud + local)
+// with the tools/decisions it ran, plus a Clear button that wipes the DB table.
+type ActivityItem = {
+  id: number;
+  at: string;
+  source: string;
+  user: string;
+  reply: string;
+  model: string | null;
+  tools: string[];
+  decisions: { name: string; args?: unknown }[];
+};
+
+function ActivityLog() {
+  const [items, setItems] = useState<ActivityItem[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [clearing, setClearing] = useState(false);
+
+  const load = useCallback(async () => {
+    try {
+      const res = await fetch("/api/activity", { cache: "no-store" });
+      const data = await res.json();
+      setItems(Array.isArray(data.items) ? data.items : []);
+    } catch { /* leave as-is */ }
+    setLoading(false);
+  }, []);
+
+  useEffect(() => {
+    load();
+    const t = setInterval(load, 20_000);
+    return () => clearInterval(t);
+  }, [load]);
+
+  async function clear() {
+    if (!(await confirmDialog("Clear the entire activity log? This wipes the database history.", { confirmLabel: "Clear", danger: true }))) return;
+    setClearing(true);
+    try {
+      await fetch("/api/activity", { method: "DELETE" });
+      setItems([]);
+    } finally {
+      setClearing(false);
+    }
+  }
+
+  return (
+    <div>
+      <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 10 }}>
+        <p style={{ opacity: 0.7, fontSize: 12, margin: 0, lineHeight: 1.5, flex: 1 }}>
+          Every assistant turn — what you asked, the tools &amp; decisions it ran, and its reply.
+          The latest few feed short-term recall. {items.length} entr{items.length === 1 ? "y" : "ies"}.
+        </p>
+        <button type="button" onClick={clear} disabled={clearing || !items.length}
+          style={{ ...linkBtn, color: "var(--u5c)" }}>
+          {clearing ? "Clearing…" : "Clear all"}
+        </button>
+      </div>
+      {loading ? (
+        <p style={{ color: "var(--t2)", fontSize: 13 }}>Loading…</p>
+      ) : items.length === 0 ? (
+        <p style={{ color: "var(--t2)", fontSize: 13 }}>No activity yet.</p>
+      ) : (
+        <ul style={{ listStyle: "none", margin: 0, padding: 0, display: "grid", gap: 8 }}>
+          {items.map((a) => (
+            <li key={a.id}
+              style={{ padding: "10px 12px", borderRadius: 12, background: "var(--a-dim)", border: "1px solid var(--border)" }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 11, opacity: 0.55, marginBottom: 4 }}>
+                <span>{new Date(a.at).toLocaleString()}</span>
+                <span style={badge(a.source === "local" ? "var(--u4c)" : "var(--t2)")}>{a.source}</span>
+                {a.model && <span className="mono">{a.model}</span>}
+              </div>
+              <div style={{ fontSize: 13, marginBottom: 3 }}>
+                <span style={{ opacity: 0.6 }}>You:</span> {a.user || <span style={{ opacity: 0.4 }}>—</span>}
+              </div>
+              <div style={{ fontSize: 13, marginBottom: a.tools.length ? 6 : 0 }}>
+                <span style={{ opacity: 0.6 }}>JARVIS:</span> {a.reply || <span style={{ opacity: 0.4 }}>—</span>}
+              </div>
+              {a.tools.length > 0 && (
+                <div style={{ display: "flex", flexWrap: "wrap", gap: 5 }}>
+                  {a.decisions.map((d, i) => (
+                    <span key={i} className="mono"
+                      title={(() => { try { return JSON.stringify(d.args); } catch { return ""; } })()}
+                      style={{ fontSize: 11, padding: "2px 8px", borderRadius: 100, background: "var(--bg2)", border: "1px solid var(--border)", opacity: 0.85 }}>
+                      {d.name}
+                    </span>
+                  ))}
+                </div>
+              )}
+            </li>
+          ))}
+        </ul>
       )}
     </div>
   );

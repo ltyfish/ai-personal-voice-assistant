@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { toFile } from "groq-sdk";
 import { groq, STT_MODEL, FALLBACK_MODELS, classifyRateLimit, sniffAudio } from "@/lib/groq";
 import { runAgent, warmModels } from "@/lib/agent";
-import { appendTurn } from "@/lib/continuity";
+import { recordActivity } from "@/lib/activity";
 import { addGroqUsage } from "@/lib/mail/blobs";
 
 export const runtime = "nodejs";
@@ -101,10 +101,16 @@ export async function POST(req: NextRequest) {
     const { reply, actions, model, models, exhausted, usage, limits, routed, routing } =
       await runAgent(userText, { userProfile, maxWords, useSnapshot, enabledTools });
 
-    // Persist this cloud turn for short-term continuity (injected as a volatile tail
-    // block on the next turn). Awaited because Vercel may freeze the function after
-    // the response — it's a single quick KV write.
-    await appendTurn(userText, reply);
+    // Persist this cloud turn to the activity log: powers both short-term recall
+    // (injected as a volatile tail block on the next turn) and the Activity card.
+    // Awaited because Vercel may freeze the function after the response.
+    await recordActivity({
+      source: "cloud",
+      user: userText,
+      reply,
+      model,
+      actions: Array.isArray(actions) ? actions.map((a: any) => ({ name: a?.name, args: a?.args })) : [],
+    });
 
     // Record into the shared Groq usage pool used by model status/routing.
     if (usage && usage.total > 0) {

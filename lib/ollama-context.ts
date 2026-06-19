@@ -200,17 +200,11 @@ export function readOllamaContextSplit(): { staticPart: string; volatilePart: st
   // keep in the cacheable prefix (it only changes when the user edits "about me").
   if (memory) staticParts.push(tail(memory, MEMORY_INJECT));
 
-  const volatileParts: string[] = [];
-  // Short-term continuity = ONLY the last few activity entries (most recent at the
-  // bottom), so JARVIS knows what just happened. This changes every turn, hence
-  // volatile — kept out of the cached prefix.
-  const recent = readRecentActivity(ACTIVITY_INJECT_LINES);
-  if (recent)
-    volatileParts.push(
-      `## Recent activity (your last ${ACTIVITY_INJECT_LINES} turns)\n${recent}`
-    );
-
-  return { staticPart: staticParts.join("\n\n"), volatilePart: volatileParts.join("\n\n") };
+  // Short-term recall (the "last N turns") now comes from the unified `activity`
+  // DB table — injected by the prep route via getRecentActivityBlock() — so cloud
+  // and local share ONE recall source. activity.md is still written for Obsidian
+  // viewing, but is no longer the recall source. Hence no volatile part here.
+  return { staticPart: staticParts.join("\n\n"), volatilePart: "" };
 }
 
 export function readOllamaContext(): string {

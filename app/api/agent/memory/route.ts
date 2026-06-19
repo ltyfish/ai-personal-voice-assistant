@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { appendDecision, appendActivity } from "@/lib/ollama-context";
+import { recordActivity } from "@/lib/activity";
 
 export const runtime = "nodejs";
 export const maxDuration = 30;
@@ -23,6 +24,15 @@ export async function POST(req: NextRequest) {
       actions.map((a: any) => String(a?.name ?? "")).filter(Boolean),
       assistant
     );
+    // Mirror into the unified `activity` DB table so local turns show in the
+    // Activity card and feed the same short-term recall as cloud turns.
+    await recordActivity({
+      source: "local",
+      user,
+      reply: assistant,
+      model: String(body.model || "local"),
+      actions: actions.map((a: any) => ({ name: String(a?.name ?? ""), args: a?.args })),
+    });
 
     return NextResponse.json({ ok: true });
   } catch (err: any) {
