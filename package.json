@@ -11,6 +11,8 @@
     "db:generate": "drizzle-kit generate",
     "db:push": "drizzle-kit push",
     "bridge": "node scripts/bridge/server.mjs",
+    "bridge:autostart": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/bridge/install-autostart.ps1",
+    "bridge:autostart:remove": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/bridge/uninstall-autostart.ps1",
     "bridge:browser-install": "playwright install chromium",
     "telegram:login": "node scripts/telegram-login.mjs",
     "models:check": "node scripts/check-models.mjs"
