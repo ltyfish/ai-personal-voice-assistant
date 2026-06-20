@@ -1253,8 +1253,12 @@ export async function prepareTurn(
 // Runs a tool-calling loop until the model produces a final spoken reply.
 export async function runAgent(
   userText: string,
-  opts?: { userProfile?: string; maxWords?: number; useSnapshot?: boolean; enabledTools?: string[] }
+  opts?: { userProfile?: string; maxWords?: number; useSnapshot?: boolean; enabledTools?: string[]; bridgeAvailable?: boolean }
 ): Promise<AgentResult> {
+  // Whether the user's computer is reachable this turn. False on mobile/cloud →
+  // bridge-dependent tool steps (WhatsApp send) refuse cleanly. Default true so
+  // existing callers behave exactly as before.
+  const toolCtx = { bridgeAvailable: opts?.bridgeAvailable ?? true };
   // Spoken-reply word cap (adjustable from the JARVIS page); clamp to a sane range.
   const maxWords = Math.max(5, Math.min(60, opts?.maxWords || MAX_REPLY_WORDS));
   // The data snapshot (current items + refs) can be turned off from the JARVIS
@@ -1361,7 +1365,7 @@ export async function runAgent(
   // pure-bulk request skips the tool-selection LLM call.
   for (const c of presetCalls) {
     console.log(`[agent] preset -> ${c.name}(${JSON.stringify(c.args)})`);
-    const result = await runTool(c.name, c.args);
+    const result = await runTool(c.name, c.args, toolCtx);
     actions.push({ name: c.name, args: c.args, result });
   }
 
@@ -1451,7 +1455,7 @@ export async function runAgent(
           result = seen.get(sig);
         } else {
           console.log(`[agent] tool -> ${call.function.name}(${JSON.stringify(args)})`);
-          result = await runTool(call.function.name, args);
+          result = await runTool(call.function.name, args, toolCtx);
           seen.set(sig, result);
           actions.push({ name: call.function.name, args, result });
         }

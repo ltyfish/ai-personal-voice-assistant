@@ -787,6 +787,9 @@ export default function VoiceButton({ onDone }: { onDone: () => void }) {
         browserOpen: browserOpenRef.current,
         // Cloud turn: withhold bridge-only tools when no laptop is connected.
         enabledTools: getEnabledLocalToolNames({ bridgeAvailable: presenceRef.current.bridge }),
+        // Lets server-side tools that need the computer (WhatsApp send) refuse
+        // cleanly and prefer Telegram/email when no laptop is connected.
+        bridgeAvailable: presenceRef.current.bridge,
       }),
       signal: controller.signal,
     });
@@ -828,6 +831,7 @@ export default function VoiceButton({ onDone }: { onDone: () => void }) {
       form.append("useSnapshot", String(useSnapshotRef.current));
       form.append("browserOpen", String(browserOpenRef.current));
       form.append("enabledTools", JSON.stringify(getEnabledLocalToolNames({ bridgeAvailable: presenceRef.current.bridge })));
+      form.append("bridgeAvailable", String(presenceRef.current.bridge));
       const controller = new AbortController();
       abortRef.current = controller;
       markThinking("jarvis");

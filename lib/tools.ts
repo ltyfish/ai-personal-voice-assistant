@@ -629,7 +629,7 @@ export const toolDefs = [
     function: {
       name: "play_spotify",
       description:
-        "PLAY on Spotify (Premium) on the active device. 'play Bohemian Rhapsody' (track), 'play the album X', 'play my Discover Weekly' (playlist), 'play some Sam Smith' (artist). Pick the right type.",
+        "PLAY on Spotify (Premium). Defaults to the user's PHONE. 'play Bohemian Rhapsody' (track), 'play the album X', 'play my Discover Weekly' (playlist), 'play some Sam Smith' (artist). Pick the right type. If the user names a device ('on my computer/laptop', 'on my phone'), pass it as `device`.",
       parameters: {
         type: "object",
         properties: {
@@ -639,6 +639,11 @@ export const toolDefs = [
             enum: ["track", "album", "playlist", "artist"],
             description:
               "what to play. 'track' (default) for a song; 'artist' for 'play some <artist>'; 'album'/'playlist' when the user says album/playlist.",
+          },
+          device: {
+            type: ["string", "null"],
+            description:
+              "ONLY if the user named where to play: 'computer'/'laptop' or 'phone' (or a device name). Omit to use the default (phone).",
           },
         },
         required: ["query"],
@@ -650,11 +655,16 @@ export const toolDefs = [
     function: {
       name: "queue_spotify",
       description:
-        "Add a song to the Spotify queue to play after the current one (e.g. 'queue up X', 'add X to the queue', 'play X next').",
+        "Add a song to the Spotify queue to play after the current one (e.g. 'queue up X', 'add X to the queue', 'play X next'). Defaults to the user's PHONE; pass `device` if they name one.",
       parameters: {
         type: "object",
         properties: {
           query: { type: "string", description: "song to queue" },
+          device: {
+            type: ["string", "null"],
+            description:
+              "ONLY if the user named where to play: 'computer'/'laptop' or 'phone' (or a device name). Omit to use the default (phone).",
+          },
         },
         required: ["query"],
       },
@@ -764,7 +774,7 @@ export const toolDefs = [
     function: {
       name: "send_message",
       description:
-        "Send a message to a person for free (NOT a calendar reminder/note). Use for 'text/message/WhatsApp/Telegram/email <someone> <something>', 'tell Mom I'll be late', 'let Alex know the meeting moved'. `to` is a saved contact name OR a raw handle (phone, @username, or email). Telegram and email send immediately; WhatsApp opens on the user's computer and is confirmed first.",
+        "Send a message to a person for free (NOT a calendar reminder/note). Use for 'text/message/WhatsApp/Telegram/email <someone> <something>', 'tell Mom I'll be late', 'let Alex know the meeting moved'. `to` is a saved contact name OR a raw handle (phone, @username, or email). Telegram and email send immediately (they work from the phone too); WhatsApp opens on the user's computer and is confirmed first, so it only works when the computer is connected — when it isn't, prefer Telegram or email.",
       parameters: {
         type: "object",
         properties: {
@@ -1123,7 +1133,16 @@ export function toolsByNames(names: string[]) {
 type Args = Record<string, any>;
 
 // Executes a tool call and returns a JSON-serializable result fed back to the LLM.
-export async function runTool(name: string, rawArgs: Args): Promise<unknown> {
+// Per-turn execution context. `bridgeAvailable` is false on the mobile/cloud
+// path (no computer connected): tools that need the local bridge to finish
+// (WhatsApp send) use it to refuse cleanly instead of returning a dead intent.
+export type ToolContext = { bridgeAvailable?: boolean };
+
+export async function runTool(
+  name: string,
+  rawArgs: Args,
+  ctx: ToolContext = {}
+): Promise<unknown> {
   const args = rawArgs ?? {};
   // The agentic browser tools drive the user's real browser via the localhost
   // bridge — only the CLIENT can reach that (lib/local-agent.ts dispatches them).
@@ -1133,7 +1152,7 @@ export async function runTool(name: string, rawArgs: Args): Promise<unknown> {
     return { error: "The controlled browser only runs on your own machine — switch to local mode (with the bridge running) to drive it." };
   }
   try {
-    return await execTool(name, args);
+    return await execTool(name, args, ctx);
   } catch (err: any) {
     // Return the error to the model so it can recover (e.g. look up a real id)
     // instead of throwing a 500 that kills the whole request.
@@ -1256,7 +1275,7 @@ async function resolveProjectId(args: Args): Promise<string | null> {
   return rows[0]?.id ?? null;
 }
 
-async function execTool(name: string, args: Args): Promise<unknown> {
+async function execTool(name: string, args: Args, ctx: ToolContext = {}): Promise<unknown> {
   switch (name) {
     case "create_task": {
       const [row] = await db
@@ -1889,16 +1908,17 @@ async function execTool(name: string, args: Args): Promise<unknown> {
       const query = (args.query ?? "").trim();
       if (!query) return { error: "no song given" };
       const type = args.type ?? "track";
+      const device = args.device ?? null;
       const r =
         type === "track"
-          ? await spotify.playQuery(query)
-          : await spotify.playContext(query, type);
+          ? await spotify.playQuery(query, device)
+          : await spotify.playContext(query, type, device);
       return r.ok ? { played: true, message: r.message } : { error: r.message };
     }
     case "queue_spotify": {
       const query = (args.query ?? "").trim();
       if (!query) return { error: "no song given" };
-      const r = await spotify.queueTrack(query);
+      const r = await spotify.queueTrack(query, args.device ?? null);
       return r.ok ? { ok: true, message: r.message } : { error: r.message };
     }
     case "spotify_control": {
@@ -2014,6 +2034,9 @@ async function execTool(name: string, args: Args): Promise<unknown> {
         message,
         subject: args.subject ?? null,
         autoSendWhatsApp,
+        // No computer connected (mobile/cloud) → WhatsApp can't run; the resolver
+        // prefers Telegram/email and refuses an explicit WhatsApp ask cleanly.
+        bridgeAvailable: ctx.bridgeAvailable ?? true,
       });
       if (!r.ok) return { error: r.error };
       // WhatsApp can't be sent from the server — return the pending intent the

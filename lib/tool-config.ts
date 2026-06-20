@@ -99,7 +99,7 @@ export const LOCAL_TOOL_GROUPS: LocalToolGroup[] = [
   {
     key: "messaging",
     label: "Messaging & contacts",
-    hint: "Send WhatsApp/Telegram/email and manage contacts.",
+    hint: "Send Telegram/email and manage contacts (work from your phone too). WhatsApp needs your computer connected.",
     tools: ["send_message", "add_contact", "list_contacts", "sync_contacts"],
   },
   {

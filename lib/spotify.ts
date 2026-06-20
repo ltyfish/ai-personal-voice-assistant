@@ -165,16 +165,54 @@ async function getDevices(): Promise<Device[]> {
   return data.devices ?? [];
 }
 
-// Choose where to play: the active device, else the desktop app ("Computer"),
-// else the first available one. Biases toward the desktop Spotify app.
-async function pickDeviceId(): Promise<string | null> {
+type DevicePick = { id: string } | { error: string };
+
+// Resolve WHICH device a command targets.
+//   • hint given ("computer", "laptop", "phone", or a device name) → that device,
+//     and if it isn't currently visible to Spotify, an error naming what IS (so
+//     "play X on my computer" with the desktop app closed says so, not silently
+//     plays on the phone).
+//   • no hint → DEFAULT to the user's PHONE (they have a laptop + phone and want
+//     the phone by default). For control actions (preferActive), the device
+//     that's actually playing wins first so "pause"/"skip" hit the right one.
+async function pickDevice(
+  hint?: string | null,
+  opts: { preferActive?: boolean } = {}
+): Promise<DevicePick> {
   const devices = await getDevices();
-  if (!devices.length) return null;
-  const pick =
-    devices.find((d) => d.is_active) ??
-    devices.find((d) => d.type?.toLowerCase() === "computer") ??
-    devices[0];
-  return pick.id;
+  if (!devices.length) return { error: NO_DEVICE };
+  const byType = (t: string) => devices.find((d) => d.type?.toLowerCase() === t);
+  const phone = byType("smartphone");
+  const computer = byType("computer");
+  const active = devices.find((d) => d.is_active);
+
+  const h = (hint || "").trim().toLowerCase();
+  if (h) {
+    const wantPhone = /\b(phone|mobile|cell|handphone|iphone|android)\b/.test(h);
+    const wantComputer = /\b(computer|laptop|pc|desktop|mac)\b/.test(h);
+    const dev =
+      devices.find((d) => d.name.toLowerCase() === h) ||
+      devices.find((d) => d.name.toLowerCase().includes(h)) ||
+      (wantPhone ? phone : undefined) ||
+      (wantComputer ? computer : undefined);
+    if (dev) return { id: dev.id };
+    const available = devices.map((d) => d.name).join(", ");
+    const which = wantComputer
+      ? "your computer"
+      : wantPhone
+      ? "your phone"
+      : `“${hint}”`;
+    return {
+      error: `I don't see ${which} on Spotify right now — open the Spotify app there, then ask again. Available now: ${available}.`,
+    };
+  }
+
+  // No hint: default to the phone. Control actions prefer whatever's already
+  // playing so they don't yank playback to a silent phone.
+  const pick = opts.preferActive
+    ? active ?? phone ?? computer ?? devices[0]
+    : phone ?? active ?? computer ?? devices[0];
+  return { id: pick.id };
 }
 
 const NO_DEVICE =
@@ -183,8 +221,9 @@ const NO_DEVICE =
 // --- Playback -------------------------------------------------------------
 export type SpotifyResult = { ok: boolean; message: string };
 
-// Search for a track and start playing it on the active device.
-export async function playQuery(query: string): Promise<SpotifyResult> {
+// Search for a track and start playing it. Defaults to the phone; pass `device`
+// ("computer"/"laptop"/"phone"/a device name) to target a specific one.
+export async function playQuery(query: string, device?: string | null): Promise<SpotifyResult> {
   const q = (query || "").trim();
   if (!q) return { ok: false, message: "Nothing to play." };
 
@@ -195,8 +234,9 @@ export async function playQuery(query: string): Promise<SpotifyResult> {
   const track = (await search.json()).tracks?.items?.[0];
   if (!track) return { ok: false, message: `Couldn't find “${q}” on Spotify.` };
 
-  const deviceId = await pickDeviceId();
-  if (!deviceId) return { ok: false, message: NO_DEVICE };
+  const dev = await pickDevice(device);
+  if ("error" in dev) return { ok: false, message: dev.error };
+  const deviceId = dev.id;
 
   const res = await api(`/me/player/play?device_id=${deviceId}`, {
     method: "PUT",
@@ -216,8 +256,10 @@ async function simple(
   path: string,
   okMsg: string
 ): Promise<SpotifyResult> {
-  const deviceId = await pickDeviceId();
-  if (!deviceId) return { ok: false, message: NO_DEVICE };
+  // Control acts on whatever's already playing, falling back to the phone.
+  const dev = await pickDevice(null, { preferActive: true });
+  if ("error" in dev) return { ok: false, message: dev.error };
+  const deviceId = dev.id;
   const sep = path.includes("?") ? "&" : "?";
   const res = await api(`${path}${sep}device_id=${deviceId}`, { method });
   if (!res.ok && res.status !== 204) {
@@ -275,15 +317,16 @@ export async function seek(seconds: number): Promise<SpotifyResult> {
 }
 
 // --- Queue ----------------------------------------------------------------
-export async function queueTrack(query: string): Promise<SpotifyResult> {
+export async function queueTrack(query: string, device?: string | null): Promise<SpotifyResult> {
   const q = (query || "").trim();
   if (!q) return { ok: false, message: "Nothing to queue." };
   const search = await api(`/search?type=track&limit=1&q=${encodeURIComponent(q)}`);
   if (!search.ok) return { ok: false, message: "Spotify search failed." };
   const track = (await search.json()).tracks?.items?.[0];
   if (!track) return { ok: false, message: `Couldn't find “${q}”.` };
-  const deviceId = await pickDeviceId();
-  if (!deviceId) return { ok: false, message: NO_DEVICE };
+  const dev = await pickDevice(device);
+  if ("error" in dev) return { ok: false, message: dev.error };
+  const deviceId = dev.id;
   const res = await api(
     `/me/player/queue?uri=${encodeURIComponent(track.uri)}&device_id=${deviceId}`,
     { method: "POST" }
@@ -310,7 +353,8 @@ async function findOwnedPlaylist(query: string): Promise<string | null> {
 // their popular tracks).
 export async function playContext(
   query: string,
-  type: string
+  type: string,
+  device?: string | null
 ): Promise<SpotifyResult> {
   const q = (query || "").trim();
   if (!q) return { ok: false, message: "Nothing to play." };
@@ -329,8 +373,9 @@ export async function playContext(
     name = item.name;
   }
 
-  const deviceId = await pickDeviceId();
-  if (!deviceId) return { ok: false, message: NO_DEVICE };
+  const dev = await pickDevice(device);
+  if ("error" in dev) return { ok: false, message: dev.error };
+  const deviceId = dev.id;
   const res = await api(`/me/player/play?device_id=${deviceId}`, {
     method: "PUT",
     body: JSON.stringify({ context_uri: uri }),
