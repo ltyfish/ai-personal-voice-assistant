@@ -631,7 +631,9 @@ function getStartApps() {
     const r = spawnSync(
       "powershell",
       ["-NoProfile", "-Command", "Get-StartApps | ConvertTo-Json -Compress"],
-      { encoding: "utf8", maxBuffer: 8 * 1024 * 1024 }
+      // windowsHide: this runs every relay heartbeat — without it a PowerShell
+      // console window flashes on the user's screen ~once a minute.
+      { encoding: "utf8", maxBuffer: 8 * 1024 * 1024, windowsHide: true }
     );
     const parsed = JSON.parse(r.stdout || "[]");
     const list = Array.isArray(parsed) ? parsed : [parsed];
@@ -1799,7 +1801,7 @@ function installAutostart() {
   const r = spawnSync(
     "powershell",
     ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", ps],
-    { encoding: "utf8" }
+    { encoding: "utf8", windowsHide: true }
   );
   if (r.status !== 0)
     return { ok: false, error: (r.stderr || r.stdout || "powershell failed").trim() };
