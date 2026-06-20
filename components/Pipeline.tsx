@@ -56,6 +56,8 @@ function reviewFoundIssues(summary: string): boolean {
 // v4: model ids are now "<platform>/<model>" (the router format), not bare model
 // ids — bump so stale bare-id team configs are dropped and re-seeded.
 const TEAMS_KEY = "pipeline.teams.v4";
+// Default workspace root — remembered per device (see workspaceRoot state).
+const WORKSPACE_ROOT_KEY = "pipeline.workspaceRoot";
 const PHASE_ICON: Record<string, string> = {
   thinking: "💭", tool: "⏳", result: "•", review: "↻", done: "✅", error: "⚠️", info: "›",
 };
@@ -170,6 +172,10 @@ export default function Pipeline({ status }: { status: LocalStatus }) {
   // ── projects + run state ──
   const [projects, setProjects] = useState<Project[]>([]);
   const [form, setForm] = useState({ name: "", workdir: "", prompt: "" });
+  // Default workspace ROOT (a folder under which each new pipeline gets its own
+  // <root>/<slug> subfolder when its Working folder is left blank). Remembered per
+  // device so you don't retype a full path for every pipeline.
+  const [workspaceRoot, setWorkspaceRoot] = useState("");
   const [creating, setCreating] = useState(false);
   const [activeId, setActiveId] = useState<string | null>(null);
   const [events, setEvents] = useState<PipelineEvent[]>([]);
@@ -225,6 +231,9 @@ export default function Pipeline({ status }: { status: LocalStatus }) {
     loadBoard();
     loadUsage();
     refresh();
+    try {
+      setWorkspaceRoot(localStorage.getItem(WORKSPACE_ROOT_KEY) || "");
+    } catch { /* ignore */ }
     try {
       const raw = localStorage.getItem(TEAMS_KEY);
       if (raw) {
@@ -289,7 +298,9 @@ export default function Pipeline({ status }: { status: LocalStatus }) {
       const res = await fetch("/api/pipeline/projects", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(form),
+        // workspaceRoot is used server-side only when workdir is left blank → the
+        // project gets its own <root>/<slug> subfolder.
+        body: JSON.stringify({ ...form, workspaceRoot }),
       });
       const data = await res.json();
       if (res.ok && data.project) {
@@ -707,8 +718,23 @@ export default function Pipeline({ status }: { status: LocalStatus }) {
       <section className="a-card" style={{ marginBottom: 16 }}>
         <h3 style={{ marginTop: 0 }}>New pipeline</h3>
         <div style={{ display: "grid", gap: 8 }}>
+          <label style={{ fontSize: 12, opacity: 0.75 }}>
+            Default workspace root — where new pipelines run unless you set a folder below
+            <input className="a-input" style={{ marginTop: 4 }}
+              placeholder="e.g. C:\Users\You\code" value={workspaceRoot}
+              onChange={(e) => {
+                const v = e.target.value;
+                setWorkspaceRoot(v);
+                try { localStorage.setItem(WORKSPACE_ROOT_KEY, v); } catch { /* ignore */ }
+              }} />
+          </label>
           <input className="a-input" placeholder="Name (e.g. Add dark mode)" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} />
-          <input className="a-input" placeholder="Working folder — full path (e.g. C:\Users\You\code\app)" value={form.workdir} onChange={(e) => setForm({ ...form, workdir: e.target.value })} />
+          <input className="a-input" placeholder="Working folder — leave blank to use the default root above" value={form.workdir} onChange={(e) => setForm({ ...form, workdir: e.target.value })} />
+          {!form.workdir.trim() && workspaceRoot.trim() && (
+            <div className="tab-sub" style={{ fontSize: 11.5, marginTop: -2 }}>
+              → this pipeline will run in <span className="mono">{workspaceRoot.trim().replace(/[\\/]+$/, "")}{workspaceRoot.includes("\\") ? "\\" : "/"}&lt;slug&gt;</span>
+            </div>
+          )}
           <textarea className="a-input" placeholder="Your prompt — what should the teams build/change?" rows={3} value={form.prompt} onChange={(e) => setForm({ ...form, prompt: e.target.value })} />
           <button className="a-btn" disabled={creating || !form.name.trim()} onClick={createProject}>{creating ? "Creating…" : "Create pipeline"}</button>
         </div>
