@@ -1053,7 +1053,10 @@ const TOOL_GROUPS: { key: GroupKey; tools: string[]; re: RegExp }[] = [
     // "folder"/"directory" live here (not shell): opening a folder by name goes
     // through open_app's folder fallback, which works WITHOUT developer mode.
     // "shut down/turn off/power off" → shutdown_computer (also without dev mode).
-    re: /\b(open|launch|website|site|browser|google|search|go to|app|tab|folder|directory|youtube|discord|whatsapp|spotify|notepad|calculator|explorer|shut\s?down|shutdown|turn off|power off|reboot)\b|\.\w{2,}/i,
+    // The shutdown verbs allow words BETWEEN the verb and particle so "turn my
+    // computer off" / "power the pc off" / "shut my laptop down" still match —
+    // not just the adjacent "turn off" / "shut down" forms.
+    re: /\b(open|launch|website|site|browser|google|search|go to|app|tab|folder|directory|youtube|discord|whatsapp|spotify|notepad|calculator|explorer|shutdown|reboot|restart)\b|\bshut\b[\w\s]{0,15}\bdown\b|\b(turn|power|switch)\b[\w\s]{0,15}\boff\b|\.\w{2,}/i,
   },
   {
     key: "shell",
