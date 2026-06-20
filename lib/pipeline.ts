@@ -107,6 +107,14 @@ export function planFileName(iteration: number): string {
   return iteration <= 1 ? "plan.md" : `plan-${iteration}.md`;
 }
 
+// A folder path pasted/picked by the user can arrive wrapped in literal quotes
+// (e.g. Windows "Copy as path" yields `"C:\…\Pipeline Projects"`). Stored as-is,
+// the quotes become part of the path and break mkdir + every run_shell cwd. Strip
+// any surrounding single/double quotes whenever a workdir is persisted.
+function cleanWorkdir(w: string | undefined): string {
+  return String(w || "").trim().replace(/^['"]+|['"]+$/g, "").trim();
+}
+
 function slugify(name: string, taken: Set<string>): string {
   const base =
     (name || "project")
@@ -151,7 +159,7 @@ export async function createProject(input: {
   // Resolve the working folder. Explicit workdir wins; otherwise, if the user set
   // a default root, give this project its own subfolder <root>/<slug>. If neither
   // is set, leave it blank — it resolves lazily to defaultWorkdir() at run time.
-  let workdir = (input.workdir || "").trim();
+  let workdir = cleanWorkdir(input.workdir);
   if (!workdir) {
     const root = (input.workspaceRoot || "").trim();
     if (root) workdir = joinUnderRoot(root, slug);
@@ -185,6 +193,7 @@ export async function updateProject(
   const p = await getProject(id);
   if (!p) return null;
   const next: PipelineProject = { ...p, ...patch, updatedAt: new Date().toISOString() };
+  if (patch.workdir !== undefined) next.workdir = cleanWorkdir(patch.workdir);
   await kvSet(NS_PROJ, id, next);
   return next;
 }

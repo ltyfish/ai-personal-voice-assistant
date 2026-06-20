@@ -312,7 +312,10 @@ async function runPhase({ projectId, phase, models, cfg, handle }, deps) {
 
   // Resolve the working folder. Empty → a stable default under the user's home so
   // a project created on the phone (no path picker) still has somewhere to build.
-  let workdir = String(prep.workdir || "").trim();
+  // Strip surrounding quotes: the path picker can store the folder wrapped in
+  // literal double/single quotes (e.g. `"C:\…\Pipeline Projects"`), which is an
+  // invalid Windows path and breaks mkdir + every run_shell cwd. Unwrap them.
+  let workdir = String(prep.workdir || "").trim().replace(/^['"]+|['"]+$/g, "").trim();
   if (!workdir) workdir = join(homedir(), "JarvisPipelines", projectId);
   try { mkdirSync(workdir, { recursive: true }); } catch { /* best-effort */ }
 

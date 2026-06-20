@@ -25,3 +25,5 @@ scripts/bridge/.browser-profile/
 
 AGENTS.md
 CLAUDE.md
+nextdev.log
+nextdev.err.log
