@@ -85,8 +85,8 @@ export const LOCAL_TOOL_GROUPS: LocalToolGroup[] = [
   {
     key: "apps",
     label: "Apps & folders",
-    hint: "Open an app or folder on your computer (URLs go to the browser tools).",
-    tools: ["open_app"],
+    hint: "Open an app or folder on your computer, or shut it down (URLs go to the browser tools).",
+    tools: ["open_app", "shutdown_computer"],
     bridgeOnly: true,
   },
   {
