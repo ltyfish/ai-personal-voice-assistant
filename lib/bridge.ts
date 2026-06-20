@@ -84,6 +84,25 @@ export async function setDevMode(enabled: boolean): Promise<{ ok: boolean; shell
   return { ok: true, shellEnabled: !!data?.shellEnabled };
 }
 
+// Make the laptop bridge launch itself at every login (a Startup-folder
+// shortcut). Runs on the bridge itself — a browser can't write to the Startup
+// folder. Goes through the shared transport so it works from localhost or the
+// phone (relay). Requires the bridge to be reachable right now.
+export async function installAutostart(): Promise<{ ok: boolean; message?: string; error?: string }> {
+  const { httpOk, data } = await runViaBridge({ action: "install_autostart" });
+  if (!httpOk) return { ok: false, error: data?.error || "Couldn't reach the bridge." };
+  return { ok: true, message: data?.message || "Auto-start at login is on." };
+}
+
+// Restart the bridge so it re-reads .env.local (apply RELAY_SECRET / RELAY_URL
+// edits without a manual relaunch). The bridge replies, then drops ~2s later as
+// it relaunches; expect a brief offline window before it heartbeats again.
+export async function restartBridge(): Promise<{ ok: boolean; message?: string; error?: string }> {
+  const { httpOk, data } = await runViaBridge({ action: "restart_bridge" });
+  if (!httpOk) return { ok: false, error: data?.error || "Couldn't reach the bridge." };
+  return { ok: true, message: data?.message || "Restarting the bridge…" };
+}
+
 export type BridgeHealth = {
   ok: boolean;
   apps?: string[];

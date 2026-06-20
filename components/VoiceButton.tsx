@@ -12,6 +12,8 @@ import {
   getUserProfile,
   setUserProfile,
   setDevMode,
+  installAutostart,
+  restartBridge,
   pageSnapshot,
   pageText,
   pageScroll,
@@ -137,6 +139,9 @@ export default function VoiceButton({ onDone }: { onDone: () => void }) {
   const [userProfile, setUserProfileState] = useState("");
   const [relaySecret, setRelaySecretState] = useState("");
   const [relayOnline, setRelayOnline] = useState<boolean | null>(null);
+  // Auto-start / restart controls on the Cloud relay card.
+  const [bridgeBusy, setBridgeBusy] = useState<null | "autostart" | "restart">(null);
+  const [bridgeMsg, setBridgeMsg] = useState("");
 
   // Local-computer presence (bridge / Ollama), polled. Used to route a
   // turn to a local backend when the user picked local/hybrid mode. Mirrored to a
@@ -1922,6 +1927,32 @@ export default function VoiceButton({ onDone }: { onDone: () => void }) {
                   {relayOnline === true && <span style={{ color: "#5fd39a" }}>● computer online</span>}
                   {relayOnline === false && <span style={{ color: "var(--t2)" }}>○ computer offline</span>}
                 </div>
+                <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 8, flexWrap: "wrap" }}>
+                  <button className="deck-btn ghost" disabled={bridgeBusy !== null} onClick={async () => {
+                    setBridgeBusy("autostart"); setBridgeMsg("");
+                    const r = await installAutostart();
+                    setBridgeBusy(null);
+                    setBridgeMsg(r.ok ? (r.message || "Auto-start at login is on.") : `Failed: ${r.error}`);
+                  }}>{bridgeBusy === "autostart" ? "Enabling…" : "Enable auto-start"}</button>
+                  <button className="deck-btn ghost" disabled={bridgeBusy !== null} onClick={async () => {
+                    setBridgeBusy("restart"); setBridgeMsg("");
+                    const r = await restartBridge();
+                    setBridgeMsg(r.ok ? "Restarting — checking back in a few seconds…" : `Failed: ${r.error}`);
+                    if (!r.ok) { setBridgeBusy(null); return; }
+                    // The bridge drops for ~2s as it relaunches; then re-probe presence.
+                    setTimeout(async () => {
+                      const p = await fetchRelayPresence();
+                      setRelayOnline(p.online);
+                      setBridgeBusy(null);
+                      setBridgeMsg(p.online ? "Bridge restarted — computer online." : "Restarted — still offline, check RELAY_SECRET / RELAY_URL.");
+                    }, 4500);
+                  }}>{bridgeBusy === "restart" ? "Restarting…" : "Restart bridge"}</button>
+                </div>
+                <p className="deck-hint">
+                  <strong>Enable auto-start</strong> makes the bridge launch at every login.{" "}
+                  <strong>Restart bridge</strong> reloads <code>.env.local</code> (apply secret / URL edits).
+                  {bridgeMsg && <><br /><span style={{ color: "var(--t2)" }}>{bridgeMsg}</span></>}
+                </p>
                 {presence.bridge && (
                   <div style={{ marginTop: 10, borderTop: "1px solid var(--line)", paddingTop: 10 }}>
                     <div className="deck-row">
