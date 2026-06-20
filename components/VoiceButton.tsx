@@ -26,6 +26,13 @@ import type { LocalActionIntent } from "@/lib/local";
 import { getModelMode } from "@/lib/local-mode";
 import { useLocalPresence } from "@/lib/local-presence";
 import { decideTurnRoute } from "@/lib/turn-route";
+import {
+  PIPER_VOICES,
+  isPiperVoiceURI,
+  piperVoiceId,
+  piperVoiceURI,
+  getPiperEngine,
+} from "@/lib/piper";
 import { runLocalTurn } from "@/lib/local-agent";
 import { publishModel, logRoute, markThinking } from "@/lib/model-hud";
 import SwirlOrb from "@/components/jarvis/SwirlOrb";
@@ -229,6 +236,10 @@ export default function VoiceButton({ onDone }: { onDone: () => void }) {
     const saved = localStorage.getItem("tts.voice") || "";
     setVoiceURI(saved);
     voiceURIRef.current = saved;
+    // Pre-download/init a saved Piper voice so the first reply plays promptly.
+    if (isPiperVoiceURI(saved)) {
+      try { void getPiperEngine(piperVoiceId(saved)).prewarm(); } catch { /* ignore */ }
+    }
     const savedRate = parseFloat(localStorage.getItem("tts.rate") || "");
     if (Number.isFinite(savedRate)) {
       setSpeechRate(savedRate);
@@ -359,6 +370,25 @@ export default function VoiceButton({ onDone }: { onDone: () => void }) {
       }
     };
     try {
+      // Piper neural voice selected → synthesize + play locally instead of the
+      // OS speechSynthesis path.
+      if (isPiperVoiceURI(voiceURIRef.current)) {
+        clearHeartbeat();
+        if (!text) {
+          setSpeaking(false);
+          onEnd?.();
+          return;
+        }
+        const engine = getPiperEngine(piperVoiceId(voiceURIRef.current));
+        engine.onSpeakingChange(setSpeaking);
+        engine.speak(text, speechRateRef.current || 1, {
+          onEnd: () => {
+            setSpeaking(false);
+            onEnd?.();
+          },
+        });
+        return;
+      }
       const synth = window.speechSynthesis;
       if (!synth || !text) {
         setSpeaking(false);
@@ -418,6 +448,18 @@ export default function VoiceButton({ onDone }: { onDone: () => void }) {
   // talking on the first sentence instead of waiting for the whole text. Call
   // finish() once the source stream ends; onAllDone fires after the queue drains.
   function makeStreamSpeaker(onAllDone: () => void) {
+    // Piper neural voice selected → stream sentences through the local engine.
+    if (isPiperVoiceURI(voiceURIRef.current)) {
+      const engine = getPiperEngine(piperVoiceId(voiceURIRef.current));
+      engine.onSpeakingChange(setSpeaking);
+      const stream = engine.makeStream(speechRateRef.current || 1, {
+        onEnd: () => {
+          setSpeaking(false);
+          onAllDone();
+        },
+      });
+      return { push: stream.push, finish: stream.finish };
+    }
     const synth = typeof window !== "undefined" ? window.speechSynthesis : null;
     let enqueued = 0;
     let ended = 0;
@@ -510,6 +552,13 @@ export default function VoiceButton({ onDone }: { onDone: () => void }) {
       window.speechSynthesis.cancel();
     } catch {
       /* ignore */
+    }
+    if (isPiperVoiceURI(voiceURIRef.current)) {
+      try {
+        getPiperEngine(piperVoiceId(voiceURIRef.current)).stop();
+      } catch {
+        /* ignore */
+      }
     }
     setSpeaking(false);
   }
@@ -1871,9 +1920,17 @@ export default function VoiceButton({ onDone }: { onDone: () => void }) {
                 <label className="deck-label">Jarvis voice</label>
                 <Select
                   value={voiceURI}
-                  onChange={(v) => { setVoiceURI(v); voiceURIRef.current = v; localStorage.setItem("tts.voice", v); }}
+                  onChange={(v) => {
+                    setVoiceURI(v); voiceURIRef.current = v; localStorage.setItem("tts.voice", v);
+                    // Warm the Piper model in the background so the first reply
+                    // isn't delayed by the one-time download/init.
+                    if (isPiperVoiceURI(v)) {
+                      try { void getPiperEngine(piperVoiceId(v)).prewarm(); } catch { /* ignore */ }
+                    }
+                  }}
                   options={[
                     { value: "", label: "Default (auto English)" },
+                    ...PIPER_VOICES.map((v) => ({ value: piperVoiceURI(v.id), label: v.label })),
                     ...voices.map((v) => ({ value: v.voiceURI, label: `${v.name} (${v.lang})${v.localService ? "" : " — online"}` })),
                   ]}
                   className="deck-select"
