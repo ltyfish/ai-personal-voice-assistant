@@ -4,7 +4,7 @@
 
 - **Code project** — `C:\Users\User\Downloads\PersonalAI`
   All code, tests, builds, installs, git. Use as working directory for any command.
-- **Project memory (Obsidian vault)** — `C:\Users\User\Downloads\Projects\Jarvis Personal AI`
+- **Project memory (Obsidian vault)** — `C:\Users\User\Downloads\PC_SYNC\Projects\Jarvis Personal AI`
   Markdown state files only. Update these here, never in the code project.
 
 The vault is project memory, not a general note vault. Do not read personal,
