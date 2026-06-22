@@ -12,7 +12,7 @@ import { sendMessage, type Channel } from "@/lib/messaging";
 import { listContacts, upsertContact, deleteContact } from "@/lib/contacts";
 import { importGoogleContacts, createGoogleContact } from "@/lib/google-contacts";
 import { isTelegramUserConfigured, importTelegramContacts } from "@/lib/telegram-user";
-import { listAllOpenPrs, getRepoStatus, summarizePr, listConfiguredRepos, listReposHealth } from "@/lib/github";
+import { listAllOpenPrs, getRepoStatus, summarizePr, summarizeRepo, listConfiguredRepos, listReposHealth } from "@/lib/github";
 import { runAll as runHealthChecks, getSelfHealth } from "@/lib/health";
 
 // JSON-schema tool definitions handed to the Groq LLM.
@@ -905,6 +905,20 @@ export const toolDefs = [
   {
     type: "function" as const,
     function: {
+      name: "github_summarize_repo",
+      description:
+        "Summarize a GitHub repository and what changed since the last time it was summarized, using the rotating models. First time gives an overview; later calls diff against the last-seen commit and summarize only the new changes. Use for 'summarize my repo owner/repo', 'what changed in owner/repo', 'catch me up on my repos'. Omit repo to summarize EVERY configured repo.",
+      parameters: {
+        type: "object",
+        properties: {
+          repo: { type: ["string", "null"], description: "Optional 'owner/repo'. Omit to summarize every configured repo." },
+        },
+      },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
       name: "github_health",
       description:
         "A 'what needs attention' digest across the user's configured GitHub repos: default-branch CI state, last-activity recency, open issues and open PR counts — useful even when no PRs are open. Use for 'how are my repos', 'anything broken on github', 'project status', 'what should I look at'.",
@@ -1083,7 +1097,7 @@ const TOOL_GROUPS: { key: GroupKey; tools: string[]; re: RegExp }[] = [
   {
     key: "github",
     // PRs / repo CI status / PR review + project health/uptime checks.
-    tools: ["github_prs", "github_status", "github_health", "github_pr_review", "health_status"],
+    tools: ["github_prs", "github_status", "github_health", "github_pr_review", "github_summarize_repo", "health_status"],
     re: /\b(github|pull request|pull requests|\bpr\b|\bprs\b|repo|repository|\bci\b|build status|merge|health|uptime|status check)\b|\bis\b.{0,20}\b(up|down|online|offline|healthy)\b/i,
   },
 ];
@@ -2150,6 +2164,26 @@ async function execTool(name: string, args: Args, ctx: ToolContext = {}): Promis
       const r = await summarizePr(owner, repo, number, mode);
       if (!r.ok) return { error: r.error };
       return { repo: `${owner}/${repo}`, number, mode, title: r.data.title, text: r.data.text };
+    }
+    case "github_summarize_repo": {
+      const filter = (args.repo ?? "").trim();
+      if (filter) {
+        const [owner, repo] = filter.split("/");
+        if (!owner || !repo) return { error: "give the repo as 'owner/repo'" };
+        const r = await summarizeRepo(owner, repo);
+        if (!r.ok) return { error: r.error };
+        return { repo: `${owner}/${repo}`, mode: r.data.mode, unchanged: r.data.unchanged, text: r.data.text };
+      }
+      const repos = await listConfiguredRepos();
+      if (!repos.length) return { error: "No repos configured — add one in the GitHub tab." };
+      const summaries = [];
+      for (const { owner, repo } of repos) {
+        const r = await summarizeRepo(owner, repo);
+        summaries.push(r.ok
+          ? { repo: `${owner}/${repo}`, mode: r.data.mode, unchanged: r.data.unchanged, text: r.data.text }
+          : { repo: `${owner}/${repo}`, error: r.error });
+      }
+      return { summaries };
     }
     case "github_health": {
       const repos = await listReposHealth();

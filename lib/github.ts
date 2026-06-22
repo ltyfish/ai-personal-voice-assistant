@@ -315,3 +315,104 @@ export async function summarizePr(
   const text = json?.choices?.[0]?.message?.content?.trim() || "(the model returned no text)";
   return { ok: true, data: { text, title: pr.data.title } };
 }
+
+// ── summarize a whole repo + changes since the last summary ───────────────────
+// The "last seen" head SHA + the previous summary are persisted in mail_kv
+// (ns "github", key "summary:owner/repo"). On the first call we summarize the
+// repo overall (description + README + recent commits); on later calls we diff
+// the default-branch head against the stored SHA and summarize ONLY what changed.
+// When nothing has changed we return the stored summary without spending tokens.
+const REPO_SUMMARY_BUDGET = 14_000; // chars of diff/README fed to the model
+
+export type RepoSummary = { sha: string; at: string; text: string; mode: "overview" | "changes" };
+
+export async function getRepoSummaryState(owner: string, repo: string): Promise<RepoSummary | null> {
+  if (!isValidRepo(owner, repo)) return null;
+  return kvGet<RepoSummary>(`summary:${owner}/${repo}`);
+}
+
+export async function summarizeRepo(
+  owner: string, repo: string, token?: string
+): Promise<GhResult<{ text: string; mode: "overview" | "changes"; sha: string; at: string; unchanged: boolean }>> {
+  if (!isValidRepo(owner, repo)) return { ok: false, status: 400, error: "Invalid owner/repo." };
+  const tok = token ?? (await getToken());
+  const meta = await gh<{ default_branch?: string; description?: string; language?: string }>(`/repos/${owner}/${repo}`, tok);
+  if (!meta.ok) return meta;
+  const branch = meta.data.default_branch || "main";
+  const head = await gh<{ sha?: string }>(`/repos/${owner}/${repo}/commits/${branch}`, tok);
+  if (!head.ok) return head;
+  const headSha = head.data.sha || "";
+  const prev = await getRepoSummaryState(owner, repo);
+
+  // Nothing new since the last press → return the stored summary, no model call.
+  if (prev && prev.sha && prev.sha === headSha) {
+    return { ok: true, data: { text: prev.text, mode: prev.mode, sha: headSha, at: prev.at, unchanged: true } };
+  }
+
+  let system: string;
+  let userContent: string;
+  let mode: "overview" | "changes";
+
+  if (prev?.sha) {
+    // Diff the stored SHA against the new head → summarize the changes.
+    mode = "changes";
+    const cmp = await gh<any>(`/repos/${owner}/${repo}/compare/${prev.sha}...${headSha}`, tok);
+    if (!cmp.ok) return cmp;
+    const commits: string = (cmp.data.commits || [])
+      .map((c: any) => `- ${String(c.sha || "").slice(0, 7)} ${String(c.commit?.message || "").split("\n")[0]} (${c.commit?.author?.name || "?"})`)
+      .join("\n");
+    let budget = REPO_SUMMARY_BUDGET;
+    const diffParts: string[] = [];
+    for (const f of cmp.data.files || []) {
+      const header = `\n--- ${f.filename} (+${f.additions}/-${f.deletions}) ---\n`;
+      const patch = typeof f.patch === "string" ? f.patch : "(no textual diff — binary or too large)";
+      const chunk = header + patch;
+      if (budget - chunk.length < 0) { diffParts.push(`${header}(diff truncated to stay within budget)`); break; }
+      budget -= chunk.length;
+      diffParts.push(chunk);
+    }
+    system = "Summarize what changed in this repository since the last check, for the repo owner. Group related changes, call out notable features, fixes, and risks, with file references. Be concise: a short paragraph followed by bullet points.";
+    userContent = [
+      `Repository: ${owner}/${repo} (branch ${branch})`,
+      `Commits since last check (${(cmp.data.commits || []).length}):\n${commits || "(none)"}`,
+      `File changes:\n${diffParts.join("\n") || "(none)"}`,
+    ].join("\n\n");
+  } else {
+    // First time → overall content overview.
+    mode = "overview";
+    const readme = await gh<{ content?: string; encoding?: string }>(`/repos/${owner}/${repo}/readme`, tok);
+    let readmeText = "";
+    if (readme.ok && readme.data.content) {
+      try {
+        readmeText = Buffer.from(readme.data.content, (readme.data.encoding as BufferEncoding) || "base64")
+          .toString("utf8").slice(0, 8000);
+      } catch { /* ignore decode errors */ }
+    }
+    const recentR = await gh<any[]>(`/repos/${owner}/${repo}/commits?sha=${branch}&per_page=15`, tok);
+    const recent = recentR.ok ? recentR.data.map((c: any) => `- ${String(c.commit?.message || "").split("\n")[0]}`).join("\n") : "";
+    system = "Summarize what this repository is and its current state, for the owner. Cover its purpose, main components, and recent direction. Be concise: a short paragraph followed by bullet points.";
+    userContent = [
+      `Repository: ${owner}/${repo} (branch ${branch})`,
+      meta.data.description ? `Description: ${meta.data.description}` : "",
+      meta.data.language ? `Primary language: ${meta.data.language}` : "",
+      readmeText ? `README:\n${readmeText}` : "(no README)",
+      recent ? `Recent commits:\n${recent}` : "",
+    ].filter(Boolean).join("\n\n");
+  }
+
+  const result = await routeChatCompletion({
+    model: "auto",
+    messages: [
+      { role: "system", content: system },
+      { role: "user", content: userContent },
+    ],
+    temperature: 0.3,
+    max_tokens: 900,
+  });
+  if (!result.ok) return { ok: false, status: result.status, error: result.error };
+  const json = await result.response.json().catch(() => ({} as any));
+  const text = json?.choices?.[0]?.message?.content?.trim() || "(the model returned no text)";
+  const at = new Date().toISOString();
+  await kvSet(`summary:${owner}/${repo}`, { sha: headSha, at, text, mode } satisfies RepoSummary);
+  return { ok: true, data: { text, mode, sha: headSha, at, unchanged: false } };
+}
