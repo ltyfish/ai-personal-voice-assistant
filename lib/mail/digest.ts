@@ -17,16 +17,28 @@ function parseDigestMinute(value: string): number | null {
   return hour * 60 + minute;
 }
 
-function digestDueNow(nowSGT: Date, digestTimes: string[], pollingIntervalMin: number) {
+// The digest cron runs hourly (see MAILMIND_CRON.md), so a narrow polling-width
+// window would drop a digest whenever the cron's minute didn't line up with the
+// digest time (or jittered past it). Instead, treat a digest as due once "now"
+// has reached its scheduled time today, and return the MOST RECENT passed time
+// so we send the right digest after a missed/late tick. Duplicate sends are
+// prevented by the per-day sentKey dedup in runDigest(), not by the window.
+function digestDueNow(nowSGT: Date, digestTimes: string[]) {
   const nowMinute = nowSGT.getUTCHours() * 60 + nowSGT.getUTCMinutes();
-  const windowMin = Math.max(1, Math.min(60, Math.round(pollingIntervalMin || 10)));
+  let best: { due: boolean; time: string | null; target: number } = {
+    due: false,
+    time: null,
+    target: -1,
+  };
   for (const time of digestTimes) {
     const target = parseDigestMinute(time);
     if (target == null) continue;
-    const elapsed = nowMinute - target;
-    if (elapsed >= 0 && elapsed < windowMin) return { due: true, time };
+    // Past (or exactly at) the scheduled time today, and the latest such time.
+    if (nowMinute >= target && target > best.target) {
+      best = { due: true, time, target };
+    }
   }
-  return { due: false, time: null as string | null };
+  return { due: best.due, time: best.time };
 }
 
 // Build category blocks: one synthesized summary per category, urgent flag,
@@ -85,7 +97,7 @@ export async function runDigest({ force = false }: { force?: boolean } = {}) {
   let sentKey = "";
 
   if (!force) {
-    const due = digestDueNow(nowSGT, notifications.digestTimes, config.pollingIntervalMin);
+    const due = digestDueNow(nowSGT, notifications.digestTimes);
     if (!due.due || !due.time) {
       console.log(
         `Skipping digest — SGT time ${nowSGT.toISOString().slice(11, 16)} not in digestTimes:`,

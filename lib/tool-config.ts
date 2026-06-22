@@ -85,8 +85,8 @@ export const LOCAL_TOOL_GROUPS: LocalToolGroup[] = [
   {
     key: "apps",
     label: "Apps & folders",
-    hint: "Open an app or folder on your computer (URLs go to the browser tools).",
-    tools: ["open_app"],
+    hint: "Open an app or folder on your computer, or shut it down (URLs go to the browser tools).",
+    tools: ["open_app", "shutdown_computer"],
     bridgeOnly: true,
   },
   {
@@ -99,7 +99,7 @@ export const LOCAL_TOOL_GROUPS: LocalToolGroup[] = [
   {
     key: "messaging",
     label: "Messaging & contacts",
-    hint: "Send WhatsApp/Telegram/email and manage contacts.",
+    hint: "Send Telegram/email and manage contacts (work from your phone too). WhatsApp needs your computer connected.",
     tools: ["send_message", "add_contact", "list_contacts", "sync_contacts"],
   },
   {

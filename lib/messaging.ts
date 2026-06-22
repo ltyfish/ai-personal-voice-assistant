@@ -162,16 +162,30 @@ function isEmail(s: string): boolean {
 
 // Decide which channel to use when the user didn't say one, given what the
 // recipient actually has. WhatsApp first (most reach), then Telegram, then email.
-function pickChannel(c: {
-  phone?: string;
-  telegram?: string;
-  email?: string;
-}): Channel | null {
-  if (c.phone) return "whatsapp";
+//
+// WhatsApp can ONLY be completed through the local bridge (it hands an intent to
+// WhatsApp Desktop). When there's no computer connected (mobile/cloud), prefer
+// the server-side channels (Telegram, then email) so an auto-pick never lands on
+// a WhatsApp intent the phone can't fulfil; fall back to WhatsApp only if it's
+// the recipient's sole handle.
+function pickChannel(
+  c: { phone?: string; telegram?: string; email?: string },
+  bridgeAvailable: boolean
+): Channel | null {
+  if (bridgeAvailable) {
+    if (c.phone) return "whatsapp";
+    if (c.telegram) return "telegram";
+    if (c.email) return "email";
+    return null;
+  }
   if (c.telegram) return "telegram";
   if (c.email) return "email";
+  if (c.phone) return "whatsapp"; // last resort — will report it needs the computer
   return null;
 }
+
+const WHATSAPP_NEEDS_COMPUTER =
+  "WhatsApp needs your computer connected (it opens WhatsApp Desktop) — try Telegram or email, or send it from your laptop.";
 
 // Infer the channel from a RAW handle when there's no saved contact.
 function inferChannelFromHandle(handle: string): Channel | null {
@@ -188,6 +202,9 @@ export type SendOptions = {
   message: string;
   subject?: string | null; // email only
   autoSendWhatsApp?: boolean; // bridge presses Enter (from user preference)
+  // False when no computer is connected (mobile/cloud): WhatsApp can't be
+  // fulfilled, so auto-pick avoids it and an explicit WhatsApp ask is refused.
+  bridgeAvailable?: boolean;
 };
 
 // Resolve recipient + channel and dispatch. Returns a SendResult the tool layer
@@ -198,9 +215,14 @@ export async function sendMessage(opts: SendOptions): Promise<SendResult> {
   const who = (opts.to || "").trim();
   if (!who) return { ok: false, error: "Who should I send it to?" };
 
+  const bridgeAvailable = opts.bridgeAvailable ?? true;
   const contact = await findContact(who);
   let channel: Channel | null = opts.channel ?? null;
   let label = contact?.name || who;
+
+  // The user explicitly asked for WhatsApp but there's no computer to run it.
+  if (channel === "whatsapp" && !bridgeAvailable)
+    return { ok: false, error: WHATSAPP_NEEDS_COMPUTER };
 
   // Resolve the destination handle for the chosen (or auto) channel.
   let phone: string | undefined;
@@ -211,12 +233,16 @@ export async function sendMessage(opts: SendOptions): Promise<SendResult> {
     phone = contact.phone;
     telegram = contact.telegram;
     email = contact.email;
-    if (!channel) channel = pickChannel(contact);
+    if (!channel) channel = pickChannel(contact, bridgeAvailable);
     if (!channel)
       return {
         ok: false,
         error: `${contact.name} has no phone, Telegram, or email saved. Add one first.`,
       };
+    // Auto-pick only fell back to WhatsApp (their sole handle) but no computer
+    // is connected to run it — say so instead of returning a dead intent.
+    if (channel === "whatsapp" && !bridgeAvailable)
+      return { ok: false, error: WHATSAPP_NEEDS_COMPUTER };
   } else {
     // Raw handle — infer the channel if not given, then slot the handle in.
     if (!channel) channel = inferChannelFromHandle(who);
@@ -225,6 +251,8 @@ export async function sendMessage(opts: SendOptions): Promise<SendResult> {
         ok: false,
         error: `I don't have a contact called “${who}”, and I can't tell how to reach that. Try a number, @username, or email.`,
       };
+    if (channel === "whatsapp" && !bridgeAvailable)
+      return { ok: false, error: WHATSAPP_NEEDS_COMPUTER };
     if (channel === "whatsapp") phone = who;
     else if (channel === "telegram") telegram = who;
     else if (channel === "email") email = who;

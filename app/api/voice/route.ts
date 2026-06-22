@@ -21,6 +21,7 @@ export async function POST(req: NextRequest) {
     let useSnapshot = true; // attach the current-data snapshot (off => fewer tokens)
     let browserOpen = false; // a controlled browser is open → de-keyword page instructions
     let enabledTools: string[] | undefined; // client tool picker allow-list
+    let bridgeAvailable = false; // is the user's computer connected this turn?
     const contentType = req.headers.get("content-type") || "";
 
     if (contentType.includes("application/json")) {
@@ -40,6 +41,7 @@ export async function POST(req: NextRequest) {
       enabledTools = Array.isArray(body.enabledTools)
         ? body.enabledTools.map((t: unknown) => String(t))
         : undefined;
+      bridgeAvailable = body.bridgeAvailable === true;
     } else {
       const form = await req.formData();
       const audio = form.get("audio");
@@ -56,6 +58,7 @@ export async function POST(req: NextRequest) {
           enabledTools = undefined;
         }
       }
+      bridgeAvailable = String(form.get("bridgeAvailable")) === "true";
       if (!(audio instanceof Blob)) {
         return NextResponse.json({ error: "no audio provided" }, { status: 400 });
       }
@@ -99,7 +102,7 @@ export async function POST(req: NextRequest) {
     }
 
     const { reply, actions, model, models, exhausted, usage, limits, routed, routing } =
-      await runAgent(userText, { userProfile, maxWords, useSnapshot, enabledTools });
+      await runAgent(userText, { userProfile, maxWords, useSnapshot, enabledTools, bridgeAvailable });
 
     // Persist this cloud turn to the activity log: powers both short-term recall
     // (injected as a volatile tail block on the next turn) and the Activity card.

@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getProject } from "@/lib/pipeline";
+import { getProject, defaultWorkdir } from "@/lib/pipeline";
 import { runCodingFileTool } from "@/lib/coding";
 
 export const runtime = "nodejs";
@@ -11,7 +11,10 @@ export async function POST(req: NextRequest) {
     const body = await req.json().catch(() => ({}));
     const project = await getProject(String(body.projectId || ""));
     if (!project) return NextResponse.json({ error: "unknown project" }, { status: 404 });
-    const result = runCodingFileTool(project.workdir, String(body.name || ""), body.args || {});
+    // Blank workdir → the same fallback the bridge uses, so the in-browser (local)
+    // path no longer fails file tools while the bridge silently builds elsewhere.
+    const workdir = project.workdir?.trim() || defaultWorkdir(project.id);
+    const result = runCodingFileTool(workdir, String(body.name || ""), body.args || {});
     return NextResponse.json({ result });
   } catch (err: any) {
     return NextResponse.json({ error: err?.message || "tool failed" }, { status: 500 });

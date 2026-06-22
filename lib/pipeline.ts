@@ -18,6 +18,7 @@
 // tools through the bridge — they sit next to the code they describe.
 import { and, eq } from "drizzle-orm";
 import { randomUUID } from "node:crypto";
+import { homedir } from "node:os";
 import { db, mailKv } from "@/db";
 
 const NS_PROJ = "pipeline_proj"; // one row per project, key = id
@@ -78,11 +79,40 @@ async function kvDel(ns: string, key: string) {
   await db.delete(mailKv).where(and(eq(mailKv.namespace, ns), eq(mailKv.key, key)));
 }
 
+// Fallback working folder when a project has no explicit workdir. MUST match the
+// bridge's fallback (scripts/bridge/pipeline.mjs) so the in-browser (local) and
+// bridge execution paths build in the SAME place instead of disagreeing (the old
+// behaviour: file tools failed locally, while the bridge silently used this dir).
+// The path targets the LAPTOP, so we don't use node:path — the server may be
+// POSIX while the laptop is Windows; we just append with the home dir's separator.
+export function defaultWorkdir(id: string): string {
+  const home = homedir();
+  const sep = home.includes("\\") ? "\\" : "/";
+  return [home.replace(/[\\/]+$/, ""), "JarvisPipelines", id].join(sep);
+}
+
+// Join a user-provided workspace ROOT with a project slug, preserving whatever
+// separator the root already uses (so a Windows root stays Windows even if this
+// code runs on a POSIX server). Used when a new project has no explicit workdir
+// but the user has set a default workspace root.
+function joinUnderRoot(root: string, slug: string): string {
+  const sep = root.includes("\\") ? "\\" : "/";
+  return [root.replace(/[\\/]+$/, ""), slug].join(sep);
+}
+
 // Plan file for a given iteration, RELATIVE to the project workdir (so the file
 // tools, which are workdir-scoped, can read/write it). Iteration 1 → plan.md.
 // Pure (no I/O) — kept synchronous so callers don't need to await it.
 export function planFileName(iteration: number): string {
   return iteration <= 1 ? "plan.md" : `plan-${iteration}.md`;
+}
+
+// A folder path pasted/picked by the user can arrive wrapped in literal quotes
+// (e.g. Windows "Copy as path" yields `"C:\…\Pipeline Projects"`). Stored as-is,
+// the quotes become part of the path and break mkdir + every run_shell cwd. Strip
+// any surrounding single/double quotes whenever a workdir is persisted.
+function cleanWorkdir(w: string | undefined): string {
+  return String(w || "").trim().replace(/^['"]+|['"]+$/g, "").trim();
 }
 
 function slugify(name: string, taken: Set<string>): string {
@@ -118,19 +148,30 @@ export async function createProject(input: {
   name: string;
   prompt: string;
   workdir: string;
+  // Optional default workspace ROOT (a folder under which each new pipeline gets
+  // its own subfolder). Used only when `workdir` is left blank.
+  workspaceRoot?: string;
 }): Promise<PipelineProject> {
   const name = (input.name || "").trim() || "Untitled pipeline";
   const existing = await listProjects();
   const slug = slugify(name, new Set(existing.map((p) => p.slug)));
   const now = new Date().toISOString();
+  // Resolve the working folder. Explicit workdir wins; otherwise, if the user set
+  // a default root, give this project its own subfolder <root>/<slug>. If neither
+  // is set, leave it blank — it resolves lazily to defaultWorkdir() at run time.
+  let workdir = cleanWorkdir(input.workdir);
+  if (!workdir) {
+    const root = (input.workspaceRoot || "").trim();
+    if (root) workdir = joinUnderRoot(root, slug);
+  }
   const p: PipelineProject = {
     id: randomUUID(),
     name,
     slug,
     prompt: (input.prompt || "").trim(),
     // A path on the laptop. The bridge creates/resolves it on first use; an empty
-    // value means "let the bridge pick a default workspace".
-    workdir: (input.workdir || "").trim(),
+    // value means "let the bridge pick a default workspace" (defaultWorkdir()).
+    workdir,
     phase: "idle",
     iteration: 1,
     planDone: false,
@@ -152,6 +193,7 @@ export async function updateProject(
   const p = await getProject(id);
   if (!p) return null;
   const next: PipelineProject = { ...p, ...patch, updatedAt: new Date().toISOString() };
+  if (patch.workdir !== undefined) next.workdir = cleanWorkdir(patch.workdir);
   await kvSet(NS_PROJ, id, next);
   return next;
 }

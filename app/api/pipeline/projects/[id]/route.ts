@@ -11,6 +11,7 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
     if (typeof body.phase === "string") patch.phase = body.phase;
     if (typeof body.prompt === "string") patch.prompt = body.prompt;
     if (typeof body.name === "string") patch.name = body.name;
+    if (typeof body.workdir === "string") patch.workdir = body.workdir;
     if (typeof body.iteration === "number") patch.iteration = body.iteration;
     if (typeof body.planDone === "boolean") patch.planDone = body.planDone;
     if (typeof body.execDone === "boolean") patch.execDone = body.execDone;

@@ -20,6 +20,7 @@ export async function POST(req: NextRequest) {
       name,
       prompt: String(body.prompt || ""),
       workdir: String(body.workdir || ""),
+      workspaceRoot: String(body.workspaceRoot || ""),
     });
     return NextResponse.json({ project });
   } catch (err: any) {

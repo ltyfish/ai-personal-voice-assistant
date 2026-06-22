@@ -26,15 +26,20 @@ import { startPipelinePhase, stopPipeline, isPipelineRunning } from "./pipeline.
 
 // Load the app's .env.local (project root) so the bridge can read SITE_URL etc.
 // Best-effort: a missing file just leaves process.env untouched. Shell-exported
-// vars still win (dotenv does not override already-set keys).
+// vars normally win (dotenv does not override already-set keys) — EXCEPT when we
+// relaunch ourselves via the "restart_bridge" action, which sets
+// BRIDGE_RELOAD_ENV=1 so the fresh process actually picks up edited .env.local
+// values (RELAY_SECRET / RELAY_URL …) instead of inheriting the old ones.
 try {
   const { config } = await import("dotenv");
-  config({ path: join(dirname(fileURLToPath(import.meta.url)), "../../.env.local") });
+  const override = /^(1|true|yes|on)$/i.test(process.env.BRIDGE_RELOAD_ENV || "");
+  config({ path: join(dirname(fileURLToPath(import.meta.url)), "../../.env.local"), override });
 } catch { /* dotenv optional — fall back to shell env */ }
 
 const HOST = "127.0.0.1";
 const PORT = Number(process.env.BRIDGE_PORT) || 7777;
 const __dirname = dirname(fileURLToPath(import.meta.url));
+const PROJECT_DIR = join(__dirname, "..", ".."); // ...\scripts\bridge -> project root
 const TOKEN_FILE = join(__dirname, ".bridge-token");
 const platform = process.platform; // "win32" | "darwin" | "linux"
 
@@ -626,7 +631,9 @@ function getStartApps() {
     const r = spawnSync(
       "powershell",
       ["-NoProfile", "-Command", "Get-StartApps | ConvertTo-Json -Compress"],
-      { encoding: "utf8", maxBuffer: 8 * 1024 * 1024 }
+      // windowsHide: this runs every relay heartbeat — without it a PowerShell
+      // console window flashes on the user's screen ~once a minute.
+      { encoding: "utf8", maxBuffer: 8 * 1024 * 1024, windowsHide: true }
     );
     const parsed = JSON.parse(r.stdout || "[]");
     const list = Array.isArray(parsed) ? parsed : [parsed];
@@ -1762,6 +1769,69 @@ function authed(req) {
 // handlers, returning a result object. Shared by the /run HTTP endpoint AND the
 // cloud relay loop, so a command from the phone goes through the EXACT same
 // safety gates (run_shell's inspectShell, validTarget, etc.) as a desktop one.
+// Wrap a value as a PowerShell single-quoted literal (backslashes stay literal,
+// no interpolation) — safe for embedding file paths into a -Command string.
+function psSingle(s) {
+  return "'" + String(s).replace(/'/g, "''") + "'";
+}
+
+// Install (or refresh) the login auto-start: drop a shortcut in the user's
+// Startup folder that launches bridge-autostart.vbs (hidden console) at every
+// login. Windows-only. Unlike install-autostart.ps1 we do NOT re-launch the
+// bridge here — it's already running (that's how this call reached us).
+function installAutostart() {
+  if (platform !== "win32")
+    return { ok: false, error: "auto-start is Windows-only for now" };
+  const vbs = join(__dirname, "bridge-autostart.vbs");
+  if (!existsSync(vbs)) return { ok: false, error: `launcher not found: ${vbs}` };
+  const ps = [
+    "$ErrorActionPreference='Stop'",
+    "$startup=[Environment]::GetFolderPath('Startup')",
+    "$lnk=Join-Path $startup 'JARVIS Bridge.lnk'",
+    "$ws=New-Object -ComObject WScript.Shell",
+    "$sc=$ws.CreateShortcut($lnk)",
+    "$sc.TargetPath=Join-Path $env:WINDIR 'System32\\wscript.exe'",
+    "$sc.Arguments='\"' + " + psSingle(vbs) + " + '\"'",
+    "$sc.WorkingDirectory=" + psSingle(PROJECT_DIR),
+    "$sc.WindowStyle=7",
+    "$sc.Description='Start JARVIS local bridge at login'",
+    "$sc.Save()",
+    "Write-Output $lnk",
+  ].join("; ");
+  const r = spawnSync(
+    "powershell",
+    ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", ps],
+    { encoding: "utf8", windowsHide: true }
+  );
+  if (r.status !== 0)
+    return { ok: false, error: (r.stderr || r.stdout || "powershell failed").trim() };
+  console.log("[bridge] auto-start installed via web app");
+  return { ok: true, path: (r.stdout || "").trim(), message: "Auto-start at login is on." };
+}
+
+// Relaunch the bridge so it re-reads .env.local. Spawn a fresh DETACHED node
+// straight away (no shell, so no quoting pitfalls); it carries
+// BRIDGE_RELOAD_ENV=1 which (a) makes dotenv override stale env values and (b)
+// makes the new process RETRY binding the port until this one exits below and
+// frees it — see the server "error" handler. This is how the web app's
+// "Restart" button applies edited RELAY_SECRET / RELAY_URL without a manual
+// relaunch.
+function restartBridge() {
+  const entry = fileURLToPath(import.meta.url);
+  const env = { ...process.env, BRIDGE_RELOAD_ENV: "1" };
+  try {
+    spawn(process.execPath, [entry], {
+      cwd: PROJECT_DIR, env, detached: true, stdio: "ignore", windowsHide: true,
+    }).unref();
+  } catch (e) {
+    return { ok: false, error: String(e?.message || e) };
+  }
+  // Let the HTTP response (and any relay result POST) flush, then exit so the
+  // freshly-spawned process can take the port.
+  setTimeout(() => { console.log("[bridge] restarting…"); process.exit(0); }, 600);
+  return { ok: true, message: "Restarting the bridge…" };
+}
+
 async function dispatchAction(body) {
   let result;
   try {
@@ -1784,6 +1854,15 @@ async function dispatchAction(body) {
       shellEnabled = !!body.enabled;
       console.log(`[bridge] developer mode ${shellEnabled ? "ENABLED" : "disabled"} via relay/run`);
       result = { ok: true, shellEnabled };
+    }
+    // Make the bridge launch itself at every login (Startup-folder shortcut).
+    // Fixed, safe op — gated by the bearer token / relay secret, no shell.
+    else if (body.action === "install_autostart") {
+      result = installAutostart();
+    }
+    // Relaunch the bridge so it re-reads .env.local (apply RELAY_SECRET/URL edits).
+    else if (body.action === "restart_bridge") {
+      result = restartBridge();
     }
     else if (body.action === "run_shell") {
       if (!shellEnabled)
@@ -2100,8 +2179,18 @@ for (const sig of ["SIGINT", "SIGTERM"]) {
   });
 }
 
+// Set on the process we spawn from restartBridge(); the previous bridge is still
+// mid-exit, so the port is briefly busy and we should wait for it, not bail.
+const IS_RELAUNCH = /^(1|true|yes|on)$/i.test(process.env.BRIDGE_RELOAD_ENV || "");
+let bindRetries = 0;
 server.on("error", (err) => {
   if (err.code === "EADDRINUSE") {
+    // Self-restart: the old process is freeing the port — retry for up to ~15s.
+    if (IS_RELAUNCH && bindRetries < 30) {
+      bindRetries++;
+      setTimeout(() => server.listen(PORT, HOST), 500);
+      return;
+    }
     console.log(`  PersonalAI bridge: port ${PORT} already in use — assuming a`);
     console.log("  bridge is already running. Nothing to do.");
     process.exit(0);
