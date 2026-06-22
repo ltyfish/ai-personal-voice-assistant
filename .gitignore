@@ -22,6 +22,7 @@ graphify-out/
 scripts/bridge/.browser-profile/
 
 .vercel
-
+AGENTS.md
+CLAUDE.md
 nextdev.log
 nextdev.err.log
