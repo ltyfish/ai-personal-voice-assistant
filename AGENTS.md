@@ -1,10 +1,9 @@
 # Coding Agent Instructions
 
 ## Two folders (do not assume they're the same)
-
-- **Code project** — `C:\Users\User\Downloads\PersonalAI`
+- **Code project** — `C:\Users\lty\Downloads\PersonalAI`
   All code, tests, builds, installs, git. Use as working directory for any command.
-- **Project memory (Obsidian vault)** — `C:\Users\User\Downloads\Projects\Jarvis Personal AI`
+- **Project memory (Obsidian vault)** — `C:\Users\lty\Downloads\PC_SYNC\Projects\Jarvis Personal AI`
   Markdown state files only. Update these here, never in the code project.
 
 The vault is project memory, not a general note vault. Do not read personal,
@@ -74,3 +73,4 @@ Don't create memory files just to satisfy this.
 ## End every response with
 
 Changed files · What was fixed/added · Tests run · Markdown files updated · Next step
+## Always commit and push after finishing work 
