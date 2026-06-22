@@ -41,6 +41,121 @@ import { Select } from "@/components/ui/Field";
 
 type Status = "idle" | "recording" | "thinking" | "confirming";
 
+// Records the spoken command as raw PCM straight off an AudioContext and encodes
+// a 16kHz mono WAV. This is the SAME audio path wake-word listening uses, which
+// is why music stays full-quality while recording — unlike MediaRecorder, which
+// flips Chrome/Windows into "communications" mode and ducks/muffles playback.
+class PcmRecorder {
+  onstop: (() => void) | null = null;
+  private ctx: AudioContext;
+  private src: MediaStreamAudioSourceNode;
+  private node: ScriptProcessorNode;
+  private chunks: Float32Array[] = [];
+  private length = 0;
+  private inRate: number;
+  private active = false;
+
+  constructor(stream: MediaStream) {
+    const Ctx =
+      window.AudioContext ||
+      (window as unknown as { webkitAudioContext: typeof AudioContext })
+        .webkitAudioContext;
+    this.ctx = new Ctx();
+    this.inRate = this.ctx.sampleRate;
+    this.src = this.ctx.createMediaStreamSource(stream);
+    this.node = this.ctx.createScriptProcessor(4096, 1, 1);
+    this.node.onaudioprocess = (e) => {
+      if (!this.active) return;
+      // Copy — the input buffer is reused by the browser after this callback.
+      this.chunks.push(new Float32Array(e.inputBuffer.getChannelData(0)));
+      this.length += this.node.bufferSize;
+    };
+  }
+
+  start() {
+    this.active = true;
+    this.src.connect(this.node);
+    // ScriptProcessor only pumps when connected to a destination; we never write
+    // its output buffer, so it emits silence (no feedback to the speakers).
+    this.node.connect(this.ctx.destination);
+    void this.ctx.resume().catch(() => {});
+  }
+
+  stop() {
+    if (!this.active) return;
+    this.active = false;
+    try {
+      this.node.disconnect();
+      this.src.disconnect();
+    } catch {
+      /* already torn down */
+    }
+    this.onstop?.();
+  }
+
+  // Flatten captured audio to a 16kHz mono 16-bit PCM WAV. Closes the context.
+  toWavBlob(): Blob {
+    const merged = new Float32Array(this.length);
+    let offset = 0;
+    for (const c of this.chunks) {
+      merged.set(c, offset);
+      offset += c.length;
+    }
+    this.dispose();
+    return encodeWav16k(merged, this.inRate);
+  }
+
+  dispose() {
+    this.chunks = [];
+    this.length = 0;
+    void this.ctx.close().catch(() => {});
+  }
+}
+
+// Linear-resample to 16kHz and write a mono 16-bit PCM WAV (RIFF/WAVE).
+function encodeWav16k(input: Float32Array, inRate: number): Blob {
+  const outRate = 16000;
+  let data: Float32Array;
+  if (inRate === outRate) {
+    data = input;
+  } else {
+    const ratio = inRate / outRate;
+    const outLen = Math.floor(input.length / ratio);
+    data = new Float32Array(outLen);
+    for (let i = 0; i < outLen; i++) {
+      const idx = i * ratio;
+      const i0 = Math.floor(idx);
+      const i1 = Math.min(i0 + 1, input.length - 1);
+      data[i] = input[i0] + (input[i1] - input[i0]) * (idx - i0);
+    }
+  }
+  const buffer = new ArrayBuffer(44 + data.length * 2);
+  const view = new DataView(buffer);
+  const writeStr = (off: number, s: string) => {
+    for (let i = 0; i < s.length; i++) view.setUint8(off + i, s.charCodeAt(i));
+  };
+  writeStr(0, "RIFF");
+  view.setUint32(4, 36 + data.length * 2, true);
+  writeStr(8, "WAVE");
+  writeStr(12, "fmt ");
+  view.setUint32(16, 16, true); // fmt chunk size
+  view.setUint16(20, 1, true); // PCM
+  view.setUint16(22, 1, true); // mono
+  view.setUint32(24, outRate, true);
+  view.setUint32(28, outRate * 2, true); // byte rate
+  view.setUint16(32, 2, true); // block align
+  view.setUint16(34, 16, true); // bits per sample
+  writeStr(36, "data");
+  view.setUint32(40, data.length * 2, true);
+  let off = 44;
+  for (let i = 0; i < data.length; i++) {
+    const s = Math.max(-1, Math.min(1, data[i]));
+    view.setInt16(off, s < 0 ? s * 0x8000 : s * 0x7fff, true);
+    off += 2;
+  }
+  return new Blob([buffer], { type: "audio/wav" });
+}
+
 const DEFAULT_RECORD_MS = 8000; // how long to record after hearing "Jarvis"
 const LIVE_IDLE_MS = 30000; // end a live session after this long with no speech
 
@@ -202,8 +317,7 @@ export default function VoiceButton({ onDone }: { onDone: () => void }) {
   };
   const enabledGroupCount = LOCAL_TOOL_GROUPS.filter((g) => !disabledGroups.has(g.key)).length;
 
-  const recorderRef = useRef<MediaRecorder | null>(null);
-  const chunksRef = useRef<Blob[]>([]);
+  const recorderRef = useRef<PcmRecorder | null>(null);
   const statusRef = useRef<Status>("idle");
   const engineRef = useRef<WakeWordEngine | null>(null);
   const listeningRef = useRef(false);
@@ -563,17 +677,6 @@ export default function VoiceButton({ onDone }: { onDone: () => void }) {
     setSpeaking(false);
   }
 
-  function pickMimeType() {
-    const candidates = [
-      "audio/webm;codecs=opus",
-      "audio/webm",
-      "audio/ogg;codecs=opus",
-      "audio/mp4",
-    ];
-    for (const t of candidates) if (MediaRecorder.isTypeSupported(t)) return t;
-    return "";
-  }
-
   function stopSilenceDetection() {
     if (silenceRafRef.current != null) {
       cancelAnimationFrame(silenceRafRef.current);
@@ -663,25 +766,24 @@ export default function VoiceButton({ onDone }: { onDone: () => void }) {
           throw new Error("no mic");
         }
       }
-      const mimeType = pickMimeType();
-      const rec = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
-      chunksRef.current = [];
-      rec.ondataavailable = (e) => {
-        if (e.data.size > 0) chunksRef.current.push(e.data);
-      };
+      // Capture the command as raw PCM off an AudioContext (the SAME clean path
+      // wake-word listening uses) instead of MediaRecorder. MediaRecorder on a
+      // mic forces Chrome's WebRTC capture pipeline on, which pushes Windows into
+      // "communications" mode and ducks/muffles music for the whole recording.
+      // ScriptProcessor capture doesn't, so music stays full-quality.
+      const rec = new PcmRecorder(stream);
       rec.onstop = () => {
         stopSilenceDetection();
         if (ownStream) stream.getTracks().forEach((t) => t.stop());
         // User cancelled this capture — discard, don't transcribe.
         if (cancelledRef.current) {
           cancelledRef.current = false;
+          rec.dispose();
           setStatusBoth("idle");
           engineRef.current?.resume();
           return;
         }
-        const blob = new Blob(chunksRef.current, {
-          type: rec.mimeType || "audio/webm",
-        });
+        const blob = rec.toWavBlob();
         if (captureModeRef.current === "confirm") {
           captureModeRef.current = "command";
           void sendConfirmAudio(blob);
@@ -867,7 +969,9 @@ export default function VoiceButton({ onDone }: { onDone: () => void }) {
         await runCloudText(text);
         return;
       }
-      const ext = blob.type.includes("mp4")
+      const ext = blob.type.includes("wav")
+        ? "wav"
+        : blob.type.includes("mp4")
         ? "mp4"
         : blob.type.includes("ogg")
         ? "ogg"
