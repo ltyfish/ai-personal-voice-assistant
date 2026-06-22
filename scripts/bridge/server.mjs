@@ -490,7 +490,9 @@ function shutdownComputer(delaySec, cancel) {
   const delay = Math.max(0, Math.min(86400, Math.floor(Number(delaySec) || 0)));
   try {
     if (platform === "win32") {
-      const args = cancel ? ["/a"] : ["/s", "/t", String(delay), "/c", "JARVIS shutdown"];
+      // /f forces running apps to close without the "You're about to be signed
+      // out" OK prompt, so the power-off is fully automatic after the countdown.
+      const args = cancel ? ["/a"] : ["/s", "/f", "/t", String(delay), "/c", "JARVIS shutdown"];
       const r = spawnSync("shutdown", args, { timeout: 8000, encoding: "utf8", windowsHide: true });
       // `shutdown /a` errors (1116) if nothing is scheduled — report that plainly.
       if (r.status !== 0) {
