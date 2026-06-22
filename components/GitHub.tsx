@@ -60,6 +60,8 @@ export default function GitHub() {
   const [health, setHealth] = useState<RepoHealth[]>([]);
   const [healthLoading, setHealthLoading] = useState(false);
   const [summary, setSummary] = useState<Record<string, { busy: boolean; text?: string; mode?: string }>>({});
+  // per-repo content/changes summary (keyed by "owner/repo")
+  const [repoSummary, setRepoSummary] = useState<Record<string, { busy: boolean; text?: string; mode?: string; at?: string; unchanged?: boolean }>>({});
   // health
   const [checks, setChecks] = useState<HealthCheck[]>([]);
   const [results, setResults] = useState<CheckResult[]>([]);
@@ -148,6 +150,18 @@ export default function GitHub() {
     } catch { setSummary((s) => ({ ...s, [key]: { busy: false } })); }
   }
 
+  async function summarizeRepoCard(h: RepoHealth) {
+    const key = h.repo;
+    setRepoSummary((s) => ({ ...s, [key]: { ...s[key], busy: true } }));
+    const [owner, repo] = h.repo.split("/");
+    try {
+      const r = await fetch("/api/github/summarize-repo", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ owner, repo }) });
+      const d = await r.json();
+      if (r.ok) setRepoSummary((s) => ({ ...s, [key]: { busy: false, text: d.text, mode: d.mode, at: d.at, unchanged: d.unchanged } }));
+      else { setRepoSummary((s) => ({ ...s, [key]: { busy: false } })); notify(d.error || "Couldn't summarize.", "error"); }
+    } catch { setRepoSummary((s) => ({ ...s, [key]: { busy: false } })); }
+  }
+
   async function addCheck() {
     if (!hcUrl.trim()) return;
     setHcBusy(true);
@@ -223,34 +237,49 @@ export default function GitHub() {
         </div>
       </details>
 
-      {/* Repo health (useful even with zero open PRs) */}
+      {/* Repo cards — health + AI summary of content & changes since last press */}
       <section className="a-card" style={{ marginTop: 12 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-          <h3 style={{ margin: 0, flex: 1 }}>Repo health</h3>
+          <h3 style={{ margin: 0, flex: 1 }}>Repositories</h3>
           <button className="a-btn a-btn-ghost" disabled={healthLoading || !tokenInfo?.hasToken} onClick={loadRepoHealth}>{healthLoading ? "Refreshing…" : "↻ Refresh"}</button>
         </div>
         {!tokenInfo?.hasToken ? (
-          <p className="tab-sub">Add a GitHub token above to load repo health.</p>
+          <p className="tab-sub">Add a GitHub token above to load your repositories.</p>
         ) : health.length === 0 ? (
           <p className="tab-sub">{healthLoading ? "Loading…" : "No repos configured."}</p>
         ) : (
-          <div style={{ display: "grid", gap: 6, marginTop: 10 }}>
-            {health.map((h) => (
-              <div key={h.repo} style={{ display: "flex", alignItems: "center", gap: 10, padding: "7px 10px", borderRadius: 8, border: "1px solid var(--border)", background: "var(--a-dim)" }}>
-                <span title={`CI: ${h.error ? "n/a" : h.ci}`} style={{ color: statusColor(h.error ? "" : h.ci), fontWeight: 700 }}>{statusIcon(h.error ? "" : h.ci)}</span>
-                <span style={{ minWidth: 160, fontSize: 12.5, fontWeight: 600 }}>{h.repo}</span>
-                {h.error ? (
-                  <span style={{ flex: 1, fontSize: 11.5, color: "#f87171" }}>{h.error}</span>
-                ) : (
-                  <span style={{ flex: 1, fontSize: 11.5, opacity: 0.7, display: "flex", gap: 10, flexWrap: "wrap" }}>
-                    <span>updated {timeAgo(h.pushedAt)}</span>
-                    <span>{h.openPrs} PR{h.openPrs === 1 ? "" : "s"}</span>
-                    <span>{h.openIssues} issue{h.openIssues === 1 ? "" : "s"}</span>
-                    {h.failingChecks.length > 0 && <span style={{ color: "#f87171" }}>failing: {h.failingChecks.slice(0, 3).join(", ")}{h.failingChecks.length > 3 ? "…" : ""}</span>}
-                  </span>
-                )}
-              </div>
-            ))}
+          <div style={{ display: "grid", gap: 10, marginTop: 10 }}>
+            {health.map((h) => {
+              const sum = repoSummary[h.repo];
+              return (
+                <div key={h.repo} style={{ border: "1px solid var(--border)", borderRadius: 10, padding: 12 }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+                    <span title={`CI: ${h.error ? "n/a" : h.ci}`} style={{ color: statusColor(h.error ? "" : h.ci), fontWeight: 700 }}>{statusIcon(h.error ? "" : h.ci)}</span>
+                    <a href={`https://github.com/${h.repo}`} target="_blank" rel="noreferrer" style={{ flex: 1, minWidth: 160, fontWeight: 600, fontSize: 13.5, color: "var(--t1)", textDecoration: "none" }}>{h.repo}</a>
+                    <button className="a-btn" disabled={sum?.busy} onClick={() => summarizeRepoCard(h)}>{sum?.busy ? "Summarizing…" : "Summarize changes"}</button>
+                  </div>
+                  {h.error ? (
+                    <div style={{ fontSize: 11.5, color: "#f87171", marginTop: 6 }}>{h.error}</div>
+                  ) : (
+                    <div style={{ fontSize: 11.5, opacity: 0.7, display: "flex", gap: 10, flexWrap: "wrap", marginTop: 6 }}>
+                      <span>updated {timeAgo(h.pushedAt)}</span>
+                      <span>{h.openPrs} PR{h.openPrs === 1 ? "" : "s"}</span>
+                      <span>{h.openIssues} issue{h.openIssues === 1 ? "" : "s"}</span>
+                      {h.failingChecks.length > 0 && <span style={{ color: "#f87171" }}>failing: {h.failingChecks.slice(0, 3).join(", ")}{h.failingChecks.length > 3 ? "…" : ""}</span>}
+                    </div>
+                  )}
+                  {sum?.text && (
+                    <div style={{ marginTop: 8, padding: 10, borderRadius: 8, background: "rgba(0,0,0,0.25)", fontSize: 12.5, lineHeight: 1.6, whiteSpace: "pre-wrap" }}>
+                      <div style={{ opacity: 0.5, fontSize: 11, marginBottom: 4 }}>
+                        {sum.unchanged ? "No new commits since last check" : sum.mode === "changes" ? "Changes since last check" : "Repo overview"}
+                        {sum.at ? ` · ${timeAgo(sum.at)}` : ""} · rotating model
+                      </div>
+                      {sum.text}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
           </div>
         )}
       </section>

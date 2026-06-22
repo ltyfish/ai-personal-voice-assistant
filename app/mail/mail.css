@@ -1978,6 +1978,10 @@
 .boot-tag {
   font-family:var(--font-mono); font-size:.6rem;
   letter-spacing:.34em; color:var(--t2); margin-bottom:1rem;
+  /* center even when the letter-spaced text wraps; the padding-left offsets the
+     trailing letter-spacing so the block reads optically centred */
+  text-align:center; max-width:min(90vw, 340px); line-height:1.7;
+  padding-left:.34em;
 }
 .boot-log {
   list-style:none; font-family:var(--font-mono); text-align:center;
