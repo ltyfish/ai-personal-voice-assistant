@@ -21,6 +21,7 @@ const isVercel = !!process.env.VERCEL;
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   distDir: isProdBuild && !isVercel ? ".next-build" : ".next",
+  output: isProdBuild && !isVercel ? "standalone" : undefined,
   // Expose the rotating proxy at a clean OpenAI base URL (/v1/...) in addition
   // to its real /api/v1/... route, so any OpenAI client can use `${origin}/v1`.
   async rewrites() {

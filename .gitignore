@@ -18,8 +18,13 @@ keyword-requests.md
 .next-build/
 
 graphify-out/
+.superpowers/
 # Bridge browser profile (runtime Chrome data, never commit)
 scripts/bridge/.browser-profile/
+
+# Windows desktop app build outputs
+desktop/dist/
+desktop/release/
 
 .vercel
 AGENTS.md

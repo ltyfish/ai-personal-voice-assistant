@@ -982,6 +982,15 @@ function UrgencyView() {
 // ───────────────────────── Settings view ─────────────────────────
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type SafeConfig = any;
+type AccountHealth = {
+  index: number;
+  label: string;
+  email?: string;
+  ok: boolean;
+  needsReconnect: boolean;
+  error?: string;
+  code?: string;
+};
 
 function SettingsView({
   api,
@@ -1009,6 +1018,7 @@ function SettingsView({
   const [waToken, setWaToken] = useState("");
   const [waPhone, setWaPhone] = useState("");
   const [digestTimes, setDigestTimes] = useState("");
+  const [accountHealth, setAccountHealth] = useState<AccountHealth[]>([]);
 
   const load = useCallback(async () => {
     const c = await api("get-settings").catch(() => null);
@@ -1025,6 +1035,9 @@ function SettingsView({
     setWaEnabled(c.notifications.whatsapp.enabled);
     setWaPhone(c.notifications.whatsapp.userPhone ?? "");
     setDigestTimes(c.notifications.digestTimes.join(", "));
+    api("check-accounts")
+      .then((r) => setAccountHealth(Array.isArray(r.accounts) ? r.accounts : []))
+      .catch(() => setAccountHealth([]));
   }, [api]);
 
   useEffect(() => {
@@ -1069,12 +1082,14 @@ function SettingsView({
     await api("update-settings", { method: "POST", body: JSON.stringify({ accounts }) });
     load();
   };
-  const connectGmail = () => {
-    const label = newLabel.trim() || "Account";
-    const index = config.accounts.length;
-    window.location.href = `/api/mail/auth-gmail?label=${encodeURIComponent(
-      label
-    )}&index=${index}&secret=${encodeURIComponent(secret)}`;
+  const gmailAuthUrl = (label: string, index: number) =>
+    `/api/mail/auth-gmail?label=${encodeURIComponent(label)}&index=${index}&secret=${encodeURIComponent(secret)}`;
+  const gmailQrUrl = (label: string, index: number) =>
+    `/api/mail/auth-qr?label=${encodeURIComponent(label)}&index=${index}&secret=${encodeURIComponent(secret)}`;
+  const connectGmail = (labelArg?: string, indexArg?: number) => {
+    const label = labelArg || newLabel.trim() || "Account";
+    const index = indexArg ?? config.accounts.length;
+    window.location.href = gmailAuthUrl(label, index);
   };
 
   const saveNotif = async () => {
@@ -1134,40 +1149,83 @@ function SettingsView({
           <h3>Gmail Accounts</h3>
           <div>
             {config.accounts.length ? (
-              config.accounts.map((a: { label: string; email?: string }, i: number) => (
-                <div
-                  key={i}
-                  style={{
-                    display: "flex",
-                    alignItems: "center",
-                    gap: "0.5rem",
-                    marginBottom: "0.5rem",
-                  }}
-                >
-                  <span className="account-tag" style={{ flexShrink: 0 }}>
-                    {a.label}
-                  </span>
-                  <span
-                    style={{
-                      fontSize: "0.85rem",
-                      flex: 1,
-                      minWidth: 0,
-                      overflow: "hidden",
-                      textOverflow: "ellipsis",
-                      whiteSpace: "nowrap",
-                    }}
-                  >
-                    {a.email ?? "unknown"}
-                  </span>
-                  <button
-                    className="btn btn-ghost"
-                    style={{ padding: "0.2rem 0.5rem", fontSize: "0.8rem", flexShrink: 0 }}
-                    onClick={() => removeAccount(i)}
-                  >
-                    ✕ Remove
-                  </button>
-                </div>
-              ))
+              config.accounts.map((a: { label: string; email?: string }, i: number) => {
+                const health = accountHealth.find((h) => h.index === i);
+                const needsReconnect = health?.needsReconnect;
+                return (
+                  <div key={i} style={{ marginBottom: "0.75rem" }}>
+                    <div
+                      style={{
+                        display: "flex",
+                        alignItems: "center",
+                        gap: "0.5rem",
+                        marginBottom: needsReconnect ? "0.55rem" : 0,
+                      }}
+                    >
+                      <span className="account-tag" style={{ flexShrink: 0 }}>
+                        {a.label}
+                      </span>
+                      <span
+                        style={{
+                          fontSize: "0.85rem",
+                          flex: 1,
+                          minWidth: 0,
+                          overflow: "hidden",
+                          textOverflow: "ellipsis",
+                          whiteSpace: "nowrap",
+                        }}
+                      >
+                        {a.email ?? "unknown"}
+                      </span>
+                      {needsReconnect && (
+                        <button
+                          className="btn btn-primary"
+                          style={{ padding: "0.2rem 0.55rem", fontSize: "0.8rem", flexShrink: 0 }}
+                          onClick={() => connectGmail(a.label, i)}
+                        >
+                          Reconnect
+                        </button>
+                      )}
+                      <button
+                        className="btn btn-ghost"
+                        style={{ padding: "0.2rem 0.5rem", fontSize: "0.8rem", flexShrink: 0 }}
+                        onClick={() => removeAccount(i)}
+                      >
+                        ✕ Remove
+                      </button>
+                    </div>
+                    {needsReconnect && (
+                      <div
+                        style={{
+                          display: "flex",
+                          gap: "0.85rem",
+                          alignItems: "center",
+                          border: "1px solid var(--border)",
+                          borderRadius: 8,
+                          padding: "0.75rem",
+                          background: "rgba(255,255,255,.03)",
+                        }}
+                      >
+                        <img
+                          src={gmailQrUrl(a.label, i)}
+                          alt={`Reconnect ${a.label} Gmail QR code`}
+                          width={112}
+                          height={112}
+                          style={{ borderRadius: 6, background: "#fff", padding: 6, flexShrink: 0 }}
+                        />
+                        <div style={{ minWidth: 0 }}>
+                          <div style={{ fontSize: "0.9rem", color: "var(--text)" }}>
+                            Gmail login expired
+                          </div>
+                          <p style={{ margin: "0.25rem 0 0", fontSize: "0.82rem", color: "var(--text-muted)" }}>
+                            {health?.error || "Scan the QR or use Reconnect to sign in again."}
+                          </p>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                );
+              })
             ) : (
               <p style={{ fontSize: "0.85rem", color: "var(--text-muted)" }}>
                 No accounts connected yet
@@ -1187,9 +1245,18 @@ function SettingsView({
                 borderRadius: "6px",
               }}
             />
-            <button className="btn btn-primary" onClick={connectGmail}>
+            <button className="btn btn-primary" onClick={() => connectGmail()}>
               + Connect Gmail Account
             </button>
+            {newLabel.trim() && (
+              <img
+                src={gmailQrUrl(newLabel.trim(), config.accounts.length)}
+                alt="Connect Gmail QR code"
+                width={96}
+                height={96}
+                style={{ borderRadius: 6, background: "#fff", padding: 6 }}
+              />
+            )}
           </div>
         </div>
       </div>

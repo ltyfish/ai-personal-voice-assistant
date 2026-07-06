@@ -1,0 +1,16 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "rootDir": "src",
+    "outDir": "dist",
+    "declaration": false,
+    "sourceMap": true
+  },
+  "include": [
+    "src/main.ts",
+    "src/preload.cts",
+    "src/main/**/*.ts",
+    "src/shared/**/*.ts"
+  ]
+}

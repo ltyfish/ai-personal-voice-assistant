@@ -31,7 +31,10 @@ export async function GET(req: Request) {
     const account: MailAccount = {
       label: label || "Account",
       email,
-      refreshToken: tokens.refresh_token ?? undefined,
+      // Google often omits refresh_token on repeat consent. Keep the old one so
+      // a harmless reconnect does not silently break polling.
+      refreshToken:
+        tokens.refresh_token ?? config.accounts[existing]?.refreshToken ?? undefined,
       lastPoll: new Date().toISOString(),
     };
 

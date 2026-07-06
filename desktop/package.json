@@ -1,0 +1,83 @@
+{
+  "name": "jarvis-desktop",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Windows JARVIS desktop pet",
+  "main": "dist/main.js",
+  "scripts": {
+    "dev": "concurrently -k \"vite --host 127.0.0.1 --port 5188\" \"wait-on http://127.0.0.1:5188 && electron .\"",
+    "build:main": "tsc -p tsconfig.main.json",
+    "build:renderer": "vite build",
+    "build": "npm run build:main && npm run build:renderer && electron-builder --win nsis",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "build": {
+    "appId": "ai.jarvis.desktop",
+    "productName": "JARVIS Desktop",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "../.next-build/standalone",
+        "to": "next-app",
+        "filter": [
+          "**/*"
+        ]
+      },
+      {
+        "from": "../.next-build/static",
+        "to": "next-app/.next-build/static",
+        "filter": [
+          "**/*"
+        ]
+      },
+      {
+        "from": "../next.config.mjs",
+        "to": "next-app/next.config.mjs"
+      },
+      {
+        "from": "../public",
+        "to": "next-app/public",
+        "filter": [
+          "**/*"
+        ]
+      },
+      {
+        "from": "../scripts/bridge",
+        "to": "scripts/bridge",
+        "filter": [
+          "**/*",
+          "!**/.browser-profile/**",
+          "!**/.bridge-token"
+        ]
+      }
+    ],
+    "win": {
+      "target": [
+        "nsis"
+      ],
+      "signAndEditExecutable": false
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "runAfterFinish": true
+    }
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^4.3.4",
+    "concurrently": "^9.1.2",
+    "electron": "^33.4.11",
+    "electron-builder": "^25.1.8",
+    "typescript": "^5.6.3",
+    "vite": "^5.4.11",
+    "wait-on": "^8.0.1"
+  }
+}
