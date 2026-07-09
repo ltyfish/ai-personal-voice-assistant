@@ -13,7 +13,8 @@
     "test:pet-images": "npm run build:main && node --test test/pet-images.test.mjs",
     "test:pet-state": "npm run build:main && node --test test/pet-visual-state.test.mjs",
     "test:pet-random": "npm run build:main && node --test test/random-pet-image.test.mjs",
-    "test": "npm run test:pet-images && npm run test:pet-state && npm run test:pet-random",
+    "test:voice-capture": "npm run build:main && node --test test/voice-capture.test.mjs",
+    "test": "npm run test:pet-images && npm run test:pet-state && npm run test:pet-random && npm run test:voice-capture",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "build": {
