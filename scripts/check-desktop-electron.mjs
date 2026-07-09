@@ -133,6 +133,11 @@ assert(/setDragging\(true\)/.test(app), "renderer must show a dragging image aft
 assert(/setTransientState\("approved"\)/.test(app), "renderer must show approved while an action runs");
 assert(/setTransientState\("denied"\)/.test(app), "renderer must show denied after rejecting an action");
 assert(/onError=/.test(app), "renderer must fall back when an override image fails");
+assert(/selectRandomPetImage/.test(app), "renderer must randomly select from image pools");
+assert(/lastPetImagesRef/.test(app), "renderer must remember the previous image per state");
+assert(/failedPetImagesRef/.test(app), "renderer must exclude failed remote images");
+assert(/300_000/.test(app), "idle image pool must rotate every five minutes");
+assert(/setInterval/.test(app), "renderer must schedule idle image rotation");
 assert(/event\.key === "Enter" && !event\.shiftKey/.test(app), "plain Enter must submit desktop prompts");
 assert(/event\.preventDefault\(\)/.test(app), "Enter submit must prevent textarea newline insertion");
 assert(!/Starting local JARVIS/.test(app), "renderer must not claim cloud backend is local startup");

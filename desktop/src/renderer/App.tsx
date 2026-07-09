@@ -1,6 +1,7 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { PointerEvent as ReactPointerEvent } from "react";
 import { selectPetVisualState } from "../shared/pet-visual-state.js";
+import { selectRandomPetImage } from "../shared/random-pet-image.js";
 import type {
   DesktopLocalActionIntent,
   DesktopStatus,
@@ -52,9 +53,12 @@ export default function App() {
   const [actionRows, setActionRows] = useState<string[]>([]);
   const [actionBusy, setActionBusy] = useState(false);
   const [petImagePools, setPetImagePools] = useState<PetImagePools>({});
+  const [petImage, setPetImage] = useState(bundledPetImages.idle);
   const [dragging, setDragging] = useState(false);
   const [transientState, setTransientState] = useState<"approved" | "denied" | null>(null);
   const transientTimerRef = useRef<number | null>(null);
+  const lastPetImagesRef = useRef<Partial<Record<PetVisualState, string>>>({});
+  const failedPetImagesRef = useRef<Partial<Record<PetVisualState, Set<string>>>>({});
   const sleeping = mode === "sleeping";
   const petVisualState = selectPetVisualState({
     dragging,
@@ -62,7 +66,16 @@ export default function App() {
     hasPendingAction: Boolean(pendingAction),
     mode,
   });
-  const petImage = petImagePools[petVisualState]?.[0] || bundledPetImages[petVisualState];
+  const choosePetImage = useCallback((state: PetVisualState, pools = petImagePools) => {
+    const failed = failedPetImagesRef.current[state] || new Set<string>();
+    const selected = selectRandomPetImage(
+      pools[state] || [],
+      lastPetImagesRef.current[state],
+      failed,
+    ) || bundledPetImages[state];
+    lastPetImagesRef.current[state] = selected;
+    setPetImage(selected);
+  }, [petImagePools]);
 
   useEffect(() => {
     window.jarvisDesktop.getStatus().then((next) => {
@@ -72,9 +85,31 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    void window.jarvisDesktop.getPetImages().then(setPetImagePools);
-    return window.jarvisDesktop.onPetImagesChanged(setPetImagePools);
+    let active = true;
+    void window.jarvisDesktop.getPetImages().then((pools) => {
+      if (!active) return;
+      failedPetImagesRef.current = {};
+      setPetImagePools(pools);
+    });
+    const unsubscribe = window.jarvisDesktop.onPetImagesChanged((pools) => {
+      failedPetImagesRef.current = {};
+      setPetImagePools(pools);
+    });
+    return () => {
+      active = false;
+      unsubscribe();
+    };
   }, []);
+
+  useEffect(() => {
+    choosePetImage(petVisualState);
+  }, [choosePetImage, petVisualState]);
+
+  useEffect(() => {
+    if (petVisualState !== "idle") return;
+    const timer = window.setInterval(() => choosePetImage("idle"), 300_000);
+    return () => window.clearInterval(timer);
+  }, [choosePetImage, petVisualState]);
 
   useEffect(() => {
     return () => {
@@ -419,9 +454,12 @@ export default function App() {
           src={petImage}
           alt=""
           draggable={false}
-          onError={(event) => {
-            const fallback = bundledPetImages[petVisualState];
-            if (event.currentTarget.src !== fallback) event.currentTarget.src = fallback;
+          onError={() => {
+            if (petImage === bundledPetImages[petVisualState]) return;
+            const failed = failedPetImagesRef.current[petVisualState] || new Set<string>();
+            failed.add(petImage);
+            failedPetImagesRef.current[petVisualState] = failed;
+            choosePetImage(petVisualState);
           }}
         />
         <span className="pet-shadow" />
