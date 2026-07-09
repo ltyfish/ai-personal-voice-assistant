@@ -1,3 +1,5 @@
+import type { DesktopUpdateStatus } from "./update-state.js";
+
 export type PetMode = "sleeping" | "idle" | "listening" | "thinking" | "speaking" | "offline";
 
 export type PetVisualState =
@@ -88,7 +90,13 @@ export type JarvisDesktopApi = {
   getModelUrl(name: string): Promise<string>;
   restartBridge(): Promise<DesktopStatus>;
   openFullJarvis(): Promise<DesktopLaunchResult>;
+  getUpdateStatus(): Promise<DesktopUpdateStatus>;
+  checkForUpdates(): Promise<DesktopUpdateStatus>;
+  installUpdate(): Promise<boolean>;
+  onUpdateStatus(listener: (status: DesktopUpdateStatus) => void): () => void;
 };
+
+export type { DesktopUpdateStatus };
 
 declare global {
   interface Window {

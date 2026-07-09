@@ -12,6 +12,7 @@ import {
 import type {
   DesktopLocalActionIntent,
   DesktopStatus,
+  DesktopUpdateStatus,
   PetImagePools,
   PetMode,
   PetVisualState,
@@ -49,6 +50,7 @@ export default function App() {
     moved: boolean;
   } | null>(null);
   const [status, setStatus] = useState<DesktopStatus | null>(null);
+  const [updateStatus, setUpdateStatus] = useState<DesktopUpdateStatus>({ state: "idle" });
   const [mode, setMode] = useState<PetMode>("idle");
   const [promptOpen, setPromptOpen] = useState(false);
   const [prompt, setPrompt] = useState("");
@@ -90,6 +92,11 @@ export default function App() {
       setStatus(next);
       setMode(next.petMode);
     });
+  }, []);
+
+  useEffect(() => {
+    void window.jarvisDesktop.getUpdateStatus().then(setUpdateStatus);
+    return window.jarvisDesktop.onUpdateStatus(setUpdateStatus);
   }, []);
 
   useEffect(() => {
@@ -578,6 +585,25 @@ export default function App() {
             </button>
             <button onClick={() => setPetMode("sleeping")}>Sleep</button>
           </div>
+
+          {(updateStatus.state === "available" || updateStatus.state === "downloading") && (
+            <p className="update-status">
+              {updateStatus.state === "downloading"
+                ? `Downloading update ${updateStatus.percent}%`
+                : `Update ${updateStatus.version} available`}
+            </p>
+          )}
+          {updateStatus.state === "ready" && (
+            <button className="update-button" onClick={() => void window.jarvisDesktop.installUpdate()}>
+              Restart and update
+            </button>
+          )}
+          {updateStatus.state === "error" && (
+            <div className="update-status">
+              <span>Update failed.</span>
+              <button onClick={() => void window.jarvisDesktop.checkForUpdates()}>Retry update</button>
+            </div>
+          )}
 
           <div className="pet-status" title={wakeIssue || `Wake ${wakeScore.toFixed(2)} / Local ${status?.bridgeOnline ? "on" : "off"}`}>
             <span className={`status-dot ${status?.bridgeOnline ? "online" : ""}`} />

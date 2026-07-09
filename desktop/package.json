@@ -14,7 +14,8 @@
     "test:pet-state": "npm run build:main && node --test test/pet-visual-state.test.mjs",
     "test:pet-random": "npm run build:main && node --test test/random-pet-image.test.mjs",
     "test:voice-capture": "npm run build:main && node --test test/voice-capture.test.mjs",
-    "test": "npm run test:pet-images && npm run test:pet-state && npm run test:pet-random && npm run test:voice-capture",
+    "test:update-state": "npm run build:main && node --test test/update-state.test.mjs",
+    "test": "npm run test:pet-images && npm run test:pet-state && npm run test:pet-random && npm run test:voice-capture && npm run test:update-state",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "build": {
@@ -63,6 +64,15 @@
         ]
       }
     ],
+    "artifactName": "JARVIS-Desktop-Setup.${ext}",
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "ltyfish",
+        "repo": "ai-personal-voice-assistant",
+        "releaseType": "release"
+      }
+    ],
     "win": {
       "target": [
         "nsis"
@@ -84,5 +94,8 @@
     "typescript": "^5.6.3",
     "vite": "^5.4.11",
     "wait-on": "^8.0.1"
+  },
+  "dependencies": {
+    "electron-updater": "^6.8.9"
   }
 }

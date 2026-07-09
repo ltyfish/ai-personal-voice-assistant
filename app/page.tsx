@@ -10,6 +10,7 @@ import { Select, DateField } from "@/components/ui/Field";
 import BootSequence from "@/components/jarvis/BootSequence";
 import { SortableList, type DragHandle } from "@/components/dnd/SortableList";
 import { NestedSortable } from "@/components/dnd/NestedSortable";
+import DesktopPetDownload from "@/components/DesktopPetDownload";
 import "./mail/mail.css";
 
 type Task = {
@@ -135,6 +136,7 @@ export default function Home() {
     <>
       {/* JARVIS power-on overlay — once per session, fades to reveal the app. */}
       <BootSequence />
+      <DesktopPetDownload />
       {/* Always mounted (not tied to the Calendar tab) so reminders fire no
           matter which tab is open. */}
       <Reminders

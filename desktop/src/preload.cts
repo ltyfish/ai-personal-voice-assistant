@@ -4,6 +4,7 @@ import type {
   AudioTurnInput,
   DesktopConfig,
   DesktopLaunchResult,
+  DesktopUpdateStatus,
   DesktopLocalActionIntent,
   JarvisDesktopApi,
   PetImagePools,
@@ -31,6 +32,14 @@ const api: JarvisDesktopApi = {
   getModelUrl: (name: string) => ipcRenderer.invoke("desktop:getModelUrl", name),
   restartBridge: () => ipcRenderer.invoke("desktop:restartBridge"),
   openFullJarvis: (): Promise<DesktopLaunchResult> => ipcRenderer.invoke("desktop:openFullJarvis"),
+  getUpdateStatus: () => ipcRenderer.invoke("desktop:getUpdateStatus"),
+  checkForUpdates: () => ipcRenderer.invoke("desktop:checkForUpdates"),
+  installUpdate: () => ipcRenderer.invoke("desktop:installUpdate"),
+  onUpdateStatus: (listener: (status: DesktopUpdateStatus) => void) => {
+    const handler = (_event: IpcRendererEvent, status: DesktopUpdateStatus) => listener(status);
+    ipcRenderer.on("desktop:updateStatus", handler);
+    return () => ipcRenderer.removeListener("desktop:updateStatus", handler);
+  },
 };
 
 contextBridge.exposeInMainWorld("jarvisDesktop", api);

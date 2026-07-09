@@ -17,6 +17,7 @@ import { bridgeOnline, restartBridge, startBridge, stopBridge } from "./main/bri
 import { CLOUD_BACKEND_URL, loadConfig, saveConfig } from "./main/config.js";
 import { loadPetImages } from "./main/pet-images.js";
 import { RUNTIME_URL, startRuntime, stopRuntime, waitForRuntime } from "./main/runtime.js";
+import { checkForUpdates, getUpdateStatus, installUpdate, startUpdater, stopUpdater } from "./main/updater.js";
 
 let petWindow: BrowserWindow | null = null;
 let tray: Tray | null = null;
@@ -400,6 +401,7 @@ function createTray() {
           bridgeIsOnline = await bridgeOnline();
         },
       },
+      { label: "Check for updates", click: () => void checkForUpdates() },
       { type: "separator" },
       { label: "Quit", click: () => app.quit() },
     ]),
@@ -456,6 +458,9 @@ ipcMain.handle("desktop:openFullJarvis", async () => {
     };
   }
 });
+ipcMain.handle("desktop:getUpdateStatus", () => getUpdateStatus());
+ipcMain.handle("desktop:checkForUpdates", () => checkForUpdates());
+ipcMain.handle("desktop:installUpdate", () => installUpdate());
 ipcMain.handle("desktop:restartBridge", async () => {
   restartBridge();
   bridgeIsOnline = await bridgeOnline();
@@ -528,6 +533,7 @@ app.whenReady().then(async () => {
   createPetWindow();
   startPetImageWatcher();
   createTray();
+  startUpdater((next) => petWindow?.webContents.send("desktop:updateStatus", next));
   if (shouldStartLocalRuntime(cfg.backendUrl)) startRuntime();
   startBridge();
   setTimeout(() => void warmVoiceBackend(), 1500);
@@ -557,6 +563,7 @@ app.on("before-quit", () => {
   unwatchFile(petImagesEnvPath());
   stopBridge();
   stopRuntime();
+  stopUpdater();
 });
 
 app.on("window-all-closed", () => {

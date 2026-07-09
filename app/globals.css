@@ -9,3 +9,55 @@
 body {
   @apply bg-neutral-950 text-neutral-100;
 }
+/* Stable website entry point for installing the floating Windows companion. */
+.desktop-pet-download {
+  position: fixed;
+  z-index: 90;
+  right: 18px;
+  bottom: 18px;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  max-width: min(520px, calc(100vw - 36px));
+  padding: 12px 14px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 14px;
+  background: rgba(14, 19, 22, 0.94);
+  box-shadow: 0 18px 50px rgba(0, 0, 0, 0.32);
+  backdrop-filter: blur(16px);
+}
+
+.desktop-pet-download div {
+  display: grid;
+  gap: 3px;
+}
+
+.desktop-pet-download span {
+  color: var(--t2);
+  font-size: 12px;
+}
+
+.desktop-pet-download a {
+  flex: 0 0 auto;
+  padding: 9px 12px;
+  border-radius: 10px;
+  background: var(--accent);
+  color: #071012;
+  font-size: 12px;
+  font-weight: 700;
+  text-decoration: none;
+}
+
+@media (max-width: 640px) {
+  .desktop-pet-download {
+    left: 12px;
+    right: 12px;
+    bottom: 12px;
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .desktop-pet-download a {
+    text-align: center;
+  }
+}

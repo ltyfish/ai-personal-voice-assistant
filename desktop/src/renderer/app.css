@@ -251,6 +251,22 @@ button:disabled {
   font-size: 12px;
 }
 
+.update-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 7px 2px 0;
+  color: rgba(247, 247, 244, 0.68);
+  font-size: 11px;
+}
+
+.update-button {
+  width: 100%;
+  margin-top: 7px;
+  border-color: rgba(172, 214, 214, 0.32);
+  background: rgba(172, 214, 214, 0.16);
+}
+
 .pet-status {
   justify-content: flex-start;
   margin: 7px 2px 0;
