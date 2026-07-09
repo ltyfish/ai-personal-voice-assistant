@@ -123,6 +123,9 @@ assert(/setWindowBounds/.test(app), "renderer must move the desktop window while
 assert(/setPromptDockOpen/.test(app), "renderer must shrink the transparent pet window while the dock is hidden");
 assert(/captureVoiceTurn/.test(app), "wake detection must capture and send a voice command");
 assert(/runAudioTurn/.test(app), "renderer must send wake-triggered audio turns through IPC");
+assert(/shouldStopForSilence/.test(app), "renderer must use the tested silence-stop decision");
+assert(/AudioContext/.test(app), "renderer must analyse microphone levels for silence");
+assert(/close\(\)/.test(app) && /cancelAnimationFrame/.test(app), "renderer must clean up voice analysis resources");
 assert(/ensureRunning/.test(wake) && /ensureRunning/.test(app), "renderer must resume wake audio from a user gesture");
 assert(/manualListen/.test(app) && /directMicStream/.test(app), "renderer must provide a direct manual listening fallback");
 assert(/>\s*Listen\s*</.test(app), "renderer must expose a Listen button for manual voice capture");

@@ -5,6 +5,10 @@ import {
   shouldRestoreIdleAfterDrag,
 } from "../shared/pet-visual-state.js";
 import { selectRandomPetImage } from "../shared/random-pet-image.js";
+import {
+  MAX_CAPTURE_MS,
+  shouldStopForSilence,
+} from "../shared/voice-capture.js";
 import type {
   DesktopLocalActionIntent,
   DesktopStatus,
@@ -352,10 +356,66 @@ export default function App() {
     const preferredType = MediaRecorder.isTypeSupported("audio/webm;codecs=opus") ? "audio/webm;codecs=opus" : "audio/webm";
     const recorder = new MediaRecorder(stream, { mimeType: preferredType });
     recorderRef.current = recorder;
+    const captureStartedAt = performance.now();
+    let analysisFrame = 0;
+    let audioContext: AudioContext | null = null;
+    let speechObserved = false;
+    let silenceStartedAt: number | null = null;
+    let analysisClosed = false;
+
+    function stopAnalysis() {
+      if (analysisClosed) return;
+      analysisClosed = true;
+      if (analysisFrame) window.cancelAnimationFrame(analysisFrame);
+      if (audioContext) void audioContext.close().catch(() => undefined);
+    }
+
+    try {
+      audioContext = new AudioContext();
+      const source = audioContext.createMediaStreamSource(stream);
+      const analyser = audioContext.createAnalyser();
+      analyser.fftSize = 512;
+      analyser.smoothingTimeConstant = 0.2;
+      source.connect(analyser);
+      const levels = new Uint8Array(analyser.fftSize);
+
+      const analyse = () => {
+        if (recorder.state === "inactive") return;
+        analyser.getByteTimeDomainData(levels);
+        let energy = 0;
+        for (const level of levels) {
+          const normalized = (level - 128) / 128;
+          energy += normalized * normalized;
+        }
+        const rms = Math.sqrt(energy / levels.length);
+        const now = performance.now();
+        if (rms >= 0.018) {
+          speechObserved = true;
+          silenceStartedAt = null;
+        } else if (speechObserved && silenceStartedAt == null) {
+          silenceStartedAt = now;
+        }
+        if (
+          shouldStopForSilence({
+            elapsedMs: now - captureStartedAt,
+            speechObserved,
+            silentForMs: silenceStartedAt == null ? 0 : now - silenceStartedAt,
+          })
+        ) {
+          recorder.stop();
+          return;
+        }
+        analysisFrame = window.requestAnimationFrame(analyse);
+      };
+      analysisFrame = window.requestAnimationFrame(analyse);
+    } catch {
+      stopAnalysis();
+    }
     recorder.ondataavailable = (event) => {
       if (event.data.size > 0) chunks.push(event.data);
     };
     recorder.onstop = async () => {
+      stopAnalysis();
       recorderRef.current = null;
       if (!chunks.length) {
         setReply("I didn't catch that.");
@@ -382,7 +442,7 @@ export default function App() {
     recorder.start();
     window.setTimeout(() => {
       if (recorderRef.current === recorder && recorder.state !== "inactive") recorder.stop();
-    }, 5200);
+    }, MAX_CAPTURE_MS);
   }
 
   async function manualListen() {
