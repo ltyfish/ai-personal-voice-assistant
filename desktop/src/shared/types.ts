@@ -10,7 +10,7 @@ export type PetVisualState =
   | "approved"
   | "talking";
 
-export type PetImageOverrides = Partial<Record<PetVisualState, string>>;
+export type PetImagePools = Partial<Record<PetVisualState, string[]>>;
 
 export type DesktopConfig = {
   backendUrl: string;
@@ -66,8 +66,8 @@ export type DesktopActionResult = {
 
 export type JarvisDesktopApi = {
   getStatus(): Promise<DesktopStatus>;
-  getPetImages(): Promise<PetImageOverrides>;
-  onPetImagesChanged(listener: (images: PetImageOverrides) => void): () => void;
+  getPetImages(): Promise<PetImagePools>;
+  onPetImagesChanged(listener: (images: PetImagePools) => void): () => void;
   saveConfig(patch: Partial<DesktopConfig>): Promise<DesktopConfig>;
   runTextTurn(text: string): Promise<VoiceTurnResult>;
   runAudioTurn(input: AudioTurnInput): Promise<VoiceTurnResult>;

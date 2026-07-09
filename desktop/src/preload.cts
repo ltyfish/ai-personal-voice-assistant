@@ -5,7 +5,7 @@ import type {
   DesktopConfig,
   DesktopLocalActionIntent,
   JarvisDesktopApi,
-  PetImageOverrides,
+  PetImagePools,
   PetMode,
   VoiceTurnResult,
   WindowBounds,
@@ -15,7 +15,7 @@ const api: JarvisDesktopApi = {
   getStatus: () => ipcRenderer.invoke("desktop:getStatus"),
   getPetImages: () => ipcRenderer.invoke("desktop:getPetImages"),
   onPetImagesChanged: (listener) => {
-    const handler = (_event: IpcRendererEvent, images: PetImageOverrides) => listener(images);
+    const handler = (_event: IpcRendererEvent, images: PetImagePools) => listener(images);
     ipcRenderer.on("desktop:petImagesChanged", handler);
     return () => ipcRenderer.removeListener("desktop:petImagesChanged", handler);
   },

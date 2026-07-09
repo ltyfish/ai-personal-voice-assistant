@@ -4,7 +4,7 @@ import { selectPetVisualState } from "../shared/pet-visual-state.js";
 import type {
   DesktopLocalActionIntent,
   DesktopStatus,
-  PetImageOverrides,
+  PetImagePools,
   PetMode,
   PetVisualState,
   VoiceTurnResult,
@@ -51,7 +51,7 @@ export default function App() {
   const [pendingAction, setPendingAction] = useState<DesktopLocalActionIntent | null>(null);
   const [actionRows, setActionRows] = useState<string[]>([]);
   const [actionBusy, setActionBusy] = useState(false);
-  const [petImages, setPetImages] = useState<PetImageOverrides>({});
+  const [petImagePools, setPetImagePools] = useState<PetImagePools>({});
   const [dragging, setDragging] = useState(false);
   const [transientState, setTransientState] = useState<"approved" | "denied" | null>(null);
   const transientTimerRef = useRef<number | null>(null);
@@ -62,7 +62,7 @@ export default function App() {
     hasPendingAction: Boolean(pendingAction),
     mode,
   });
-  const petImage = petImages[petVisualState] || bundledPetImages[petVisualState];
+  const petImage = petImagePools[petVisualState]?.[0] || bundledPetImages[petVisualState];
 
   useEffect(() => {
     window.jarvisDesktop.getStatus().then((next) => {
@@ -72,8 +72,8 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    void window.jarvisDesktop.getPetImages().then(setPetImages);
-    return window.jarvisDesktop.onPetImagesChanged(setPetImages);
+    void window.jarvisDesktop.getPetImages().then(setPetImagePools);
+    return window.jarvisDesktop.onPetImagesChanged(setPetImagePools);
   }, []);
 
   useEffect(() => {

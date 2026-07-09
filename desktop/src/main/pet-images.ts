@@ -1,7 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { isAbsolute } from "node:path";
 import { pathToFileURL } from "node:url";
-import type { PetImageOverrides, PetVisualState } from "../shared/types.js";
+import type { PetImagePools, PetVisualState } from "../shared/types.js";
 
 export const PET_IMAGE_ENV_KEYS: Record<PetVisualState, string> = {
   idle: "JARVIS_PET_IDLE_IMAGE",
@@ -24,6 +24,7 @@ export function parsePetImageEnv(contents: string): Record<string, string> {
     const key = line.slice(0, separator).trim();
     let value = line.slice(separator + 1).trim();
     if (
+      !value.includes(",") &&
       value.length >= 2 &&
       ((value.startsWith('"') && value.endsWith('"')) ||
         (value.startsWith("'") && value.endsWith("'")))
@@ -33,6 +34,24 @@ export function parsePetImageEnv(contents: string): Record<string, string> {
     if (value) values[key] = value;
   }
   return values;
+}
+
+function unquote(value: string) {
+  if (
+    value.length >= 2 &&
+    ((value.startsWith('"') && value.endsWith('"')) ||
+      (value.startsWith("'") && value.endsWith("'")))
+  ) {
+    return value.slice(1, -1).trim();
+  }
+  return value;
+}
+
+export function parsePetImageList(value: string): string[] {
+  return value
+    .split(",")
+    .map((item) => unquote(item.trim()))
+    .filter(Boolean);
 }
 
 function resolveImage(value: string): string | undefined {
@@ -51,15 +70,20 @@ function resolveImage(value: string): string | undefined {
 export function loadPetImages(
   envFilePath: string,
   processValues: NodeJS.ProcessEnv = process.env,
-): PetImageOverrides {
+): PetImagePools {
   const fileValues = existsSync(envFilePath)
     ? parsePetImageEnv(readFileSync(envFilePath, "utf8"))
     : {};
-  const images: PetImageOverrides = {};
+  const images: PetImagePools = {};
   for (const [state, key] of Object.entries(PET_IMAGE_ENV_KEYS) as [PetVisualState, string][]) {
     const value = processValues[key]?.trim() || fileValues[key];
-    const resolved = value ? resolveImage(value) : undefined;
-    if (resolved) images[state] = resolved;
+    const resolved = value
+      ? parsePetImageList(value)
+          .map(resolveImage)
+          .filter((image): image is string => Boolean(image))
+      : [];
+    const unique = [...new Set(resolved)];
+    if (unique.length) images[state] = unique;
   }
   return images;
 }
