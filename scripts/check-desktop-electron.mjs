@@ -102,6 +102,8 @@ assert(/desktop:getUpdateStatus/.test(main), "main process must expose update st
 assert(/desktop:checkForUpdates/.test(main), "main process must expose manual update checks");
 assert(/desktop:installUpdate/.test(main), "main process must expose confirmed update installation");
 assert(/app\.isPackaged/.test(updater), "automatic updates must be disabled in development");
+assert(!/import\s*\{\s*autoUpdater\s*\}\s*from\s*["']electron-updater["']/.test(updater), "CommonJS electron-updater must not use an ESM named import");
+assert(/import\s+\w+\s+from\s+["']electron-updater["']/.test(updater), "electron-updater must load through its CommonJS default export");
 assert(/autoDownload\s*=\s*true/.test(updater), "available updates must download automatically");
 assert(/quitAndInstall/.test(updater), "updater must install only after renderer confirmation");
 assert(/desktop:openFullJarvis/.test(main), "main process must expose full website launch IPC");

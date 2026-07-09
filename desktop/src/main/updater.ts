@@ -1,11 +1,13 @@
 import { app } from "electron";
-import { autoUpdater } from "electron-updater";
+import updaterPackage from "electron-updater";
 import {
   initialUpdateStatus,
   reduceUpdateEvent,
   type DesktopUpdateEvent,
   type DesktopUpdateStatus,
 } from "../shared/update-state.js";
+
+const { autoUpdater } = updaterPackage;
 
 let updateStatus: DesktopUpdateStatus = initialUpdateStatus;
 let publishStatus: ((status: DesktopUpdateStatus) => void) | null = null;
