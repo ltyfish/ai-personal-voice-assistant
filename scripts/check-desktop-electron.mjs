@@ -46,6 +46,7 @@ const runtime = read("desktop/src/main/runtime.ts");
 const bridge = read("desktop/src/main/bridge.ts");
 const viteConfig = read("desktop/vite.config.ts");
 const app = read("desktop/src/renderer/App.tsx");
+const appCss = read("desktop/src/renderer/app.css");
 const wake = read("desktop/src/renderer/wake.ts");
 const voice = read("desktop/src/renderer/voice.ts");
 const localUpdater = read("scripts/update-desktop-local.ps1");
@@ -147,6 +148,14 @@ assert(!/Starting local JARVIS/.test(app), "renderer must not claim cloud backen
 assert(/idlePet/.test(app) && /thinkingPet/.test(app) && /approvalPet/.test(app), "renderer must use character pet image states");
 assert(/listeningPet/.test(app) && /deniedPet/.test(app) && /talkingPet/.test(app), "renderer must bundle activity and approval-result images");
 assert(/className="pet-character"/.test(app), "renderer must render the character pet instead of an orb");
+assert(
+  /\.pet-character:hover:not\(:disabled\)[^{]*\{[^}]*background:\s*transparent/.test(appCss),
+  "pet hover must remain transparent",
+);
+assert(
+  /\.pet-character:active:not\(:disabled\)[^{]*\{[^}]*transform:\s*none/.test(appCss),
+  "pet active state must not inherit generic button translation",
+);
 assert(/@keyframes pet-idle-float/.test(read("desktop/src/renderer/app.css")), "idle pet must have subtle float animation");
 assert(/@keyframes thinking-scoot/.test(read("desktop/src/renderer/app.css")), "thinking pet must visibly move");
 assert(/@keyframes talking-pulse/.test(read("desktop/src/renderer/app.css")), "talking pet must animate");

@@ -216,6 +216,18 @@ button:active:not(:disabled) {
   transform: translateY(1px);
 }
 
+.pet-character:hover:not(:disabled),
+.pet-character:focus-visible {
+  border-color: transparent;
+  background: transparent;
+}
+
+.pet-character:active:not(:disabled) {
+  border-color: transparent;
+  background: transparent;
+  transform: none;
+}
+
 button:disabled {
   cursor: default;
   opacity: 0.42;
