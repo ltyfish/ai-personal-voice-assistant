@@ -13,6 +13,9 @@ if (!publish.includes("github") || !publish.includes("ltyfish") || !publish.incl
 if (pkg.build?.artifactName !== "JARVIS-Desktop-Setup.${ext}") {
   throw new Error("desktop installer must use a stable latest-release filename");
 }
+if (!JSON.stringify(pkg.build?.extraResources || []).includes("../Images")) {
+  throw new Error("desktop installer must package the state image library");
+}
 
 const workflow = read(".github/workflows/release-desktop.yml");
 for (const required of ["main", "contents: write", "windows-latest", "npm ci", "npm run build", "desktop test", "desktop run typecheck", "GH_TOKEN", "--publish always"]) {

@@ -55,6 +55,13 @@
         ]
       },
       {
+        "from": "../Images",
+        "to": "pet-images",
+        "filter": [
+          "*.png"
+        ]
+      },
+      {
         "from": "../scripts/bridge",
         "to": "scripts/bridge",
         "filter": [

@@ -15,7 +15,7 @@ import type {
 } from "./shared/types.js";
 import { bridgeOnline, restartBridge, startBridge, stopBridge } from "./main/bridge.js";
 import { CLOUD_BACKEND_URL, loadConfig, saveConfig } from "./main/config.js";
-import { loadPetImages } from "./main/pet-images.js";
+import { loadBundledPetImages, loadPetImages } from "./main/pet-images.js";
 import { RUNTIME_URL, startRuntime, stopRuntime, waitForRuntime } from "./main/runtime.js";
 import { checkForUpdates, getUpdateStatus, installUpdate, startUpdater, stopUpdater } from "./main/updater.js";
 
@@ -59,7 +59,13 @@ function petImagesEnvPath() {
 }
 
 function currentPetImages() {
-  return loadPetImages(petImagesEnvPath());
+  const bundledDirectory = app.isPackaged
+    ? join(process.resourcesPath, "pet-images")
+    : join(mainDir, "../../Images");
+  return {
+    ...loadBundledPetImages(bundledDirectory),
+    ...loadPetImages(petImagesEnvPath()),
+  };
 }
 
 function startPetImageWatcher() {

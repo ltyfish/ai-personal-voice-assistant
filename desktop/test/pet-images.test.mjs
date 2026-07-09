@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import {
+  classifyPetImageName,
   loadPetImages,
   parsePetImageEnv,
   parsePetImageList,
@@ -68,4 +69,15 @@ test("loads local files and URLs while process variables take precedence", async
 
 test("returns no overrides when the environment file is missing", () => {
   assert.deepEqual(loadPetImages("Z:\\missing\\jarvis-pet.env", {}), {});
+});
+
+test("classifies image filenames into their intended visual states", () => {
+  assert.equal(classifyPetImageName("Sawako Idle V1.png"), "idle");
+  assert.equal(classifyPetImageName("Sawako Dragged V2.png"), "dragging");
+  assert.equal(classifyPetImageName("Sawako Listening V3.png"), "listening");
+  assert.equal(classifyPetImageName("Kazehaya Thinking V2.png"), "thinking");
+  assert.equal(classifyPetImageName("Ayane Approval V2.png"), "approval");
+  assert.equal(classifyPetImageName("Ume Denied V3.png"), "denied");
+  assert.equal(classifyPetImageName("Sawako Approved V3.png"), "approved");
+  assert.equal(classifyPetImageName("Sawako Talking V1.png"), "talking");
 });

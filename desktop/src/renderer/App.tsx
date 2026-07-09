@@ -42,6 +42,12 @@ const bundledPetImages: Record<PetVisualState, string> = {
 export default function App() {
   const wakeRef = useRef<WakeHandle | null>(null);
   const recorderRef = useRef<MediaRecorder | null>(null);
+  const windowBoundsRef = useRef<WindowBounds>({
+    x: window.screenX,
+    y: window.screenY,
+    width: window.outerWidth,
+    height: window.outerHeight,
+  });
   const dragRef = useRef<{
     pointerId: number;
     startScreenX: number;
@@ -91,6 +97,12 @@ export default function App() {
     window.jarvisDesktop.getStatus().then((next) => {
       setStatus(next);
       setMode(next.petMode);
+    });
+  }, []);
+
+  useEffect(() => {
+    void window.jarvisDesktop.getWindowBounds().then((bounds) => {
+      windowBoundsRef.current = bounds;
     });
   }, []);
 
@@ -196,18 +208,23 @@ export default function App() {
     setPromptOpen((open) => !open);
   }
 
-  async function handleOrbPointerDown(event: ReactPointerEvent<HTMLButtonElement>) {
+  function handleOrbPointerDown(event: ReactPointerEvent<HTMLButtonElement>) {
     if (event.button !== 0) return;
     setDragging(false);
     event.currentTarget.setPointerCapture(event.pointerId);
-    const bounds = await window.jarvisDesktop.getWindowBounds();
     dragRef.current = {
       pointerId: event.pointerId,
       startScreenX: event.screenX,
       startScreenY: event.screenY,
-      bounds,
+      bounds: windowBoundsRef.current,
       moved: false,
     };
+    void window.jarvisDesktop.getWindowBounds().then((bounds) => {
+      windowBoundsRef.current = bounds;
+      if (dragRef.current?.pointerId === event.pointerId && !dragRef.current.moved) {
+        dragRef.current.bounds = bounds;
+      }
+    });
   }
 
   function handleOrbPointerMove(event: ReactPointerEvent<HTMLButtonElement>) {
@@ -220,11 +237,13 @@ export default function App() {
       drag.moved = true;
       setDragging(true);
     }
-    void window.jarvisDesktop.setWindowBounds({
+    const nextBounds = {
       ...drag.bounds,
       x: drag.bounds.x + deltaX,
       y: drag.bounds.y + deltaY,
-    });
+    };
+    windowBoundsRef.current = nextBounds;
+    void window.jarvisDesktop.setWindowBounds(nextBounds);
   }
 
   function handleOrbPointerUp(event: ReactPointerEvent<HTMLButtonElement>) {

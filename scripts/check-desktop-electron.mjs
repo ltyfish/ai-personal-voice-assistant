@@ -138,6 +138,7 @@ assert(/promptOpen/.test(app), "renderer prompt dock must be toggleable");
 assert(/!sleeping && promptOpen/.test(app), "renderer prompt must only show after pressing the pet");
 assert(/onPointerDown=\{handleOrbPointerDown\}/.test(app), "pet must start manual drag handling on pointer down");
 assert(/setWindowBounds/.test(app), "renderer must move the desktop window while dragging the pet");
+assert(/windowBoundsRef/.test(app), "renderer must arm dragging synchronously from cached window bounds");
 assert(/setPromptDockOpen/.test(app), "renderer must shrink the transparent pet window while the dock is hidden");
 assert(/captureVoiceTurn/.test(app), "wake detection must capture and send a voice command");
 assert(/runAudioTurn/.test(app), "renderer must send wake-triggered audio turns through IPC");
@@ -175,6 +176,7 @@ assert(
   /\.pet-character:hover:not\(:disabled\)[^{]*\{[^}]*background:\s*transparent/.test(appCss),
   "pet hover must remain transparent",
 );
+assert(/\.pet-character[^{]*\{[^}]*outline:\s*none/.test(appCss), "pet character must suppress the native focus rectangle");
 assert(
   /\.pet-character:active:not\(:disabled\)[^{]*\{[^}]*transform:\s*none/.test(appCss),
   "pet active state must not inherit generic button translation",

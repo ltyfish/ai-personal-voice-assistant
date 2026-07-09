@@ -1,5 +1,5 @@
-import { existsSync, readFileSync } from "node:fs";
-import { isAbsolute } from "node:path";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { isAbsolute, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import type { PetImagePools, PetVisualState } from "../shared/types.js";
 
@@ -13,6 +13,31 @@ export const PET_IMAGE_ENV_KEYS: Record<PetVisualState, string> = {
   approved: "JARVIS_PET_APPROVED_IMAGE",
   talking: "JARVIS_PET_TALKING_IMAGE",
 };
+
+export function classifyPetImageName(name: string): PetVisualState | undefined {
+  const normalized = name.toLowerCase();
+  if (normalized.includes("dragged")) return "dragging";
+  if (normalized.includes("listening")) return "listening";
+  if (normalized.includes("thinking")) return "thinking";
+  if (normalized.includes("approved")) return "approved";
+  if (normalized.includes("approval")) return "approval";
+  if (normalized.includes("denied")) return "denied";
+  if (normalized.includes("talking")) return "talking";
+  if (normalized.includes("idle")) return "idle";
+  return undefined;
+}
+
+export function loadBundledPetImages(directory: string): PetImagePools {
+  if (!existsSync(directory)) return {};
+  const pools: PetImagePools = {};
+  for (const name of readdirSync(directory)) {
+    if (!name.toLowerCase().endsWith(".png")) continue;
+    const state = classifyPetImageName(name);
+    if (!state) continue;
+    (pools[state] ??= []).push(pathToFileURL(join(directory, name)).toString());
+  }
+  return pools;
+}
 
 export function parsePetImageEnv(contents: string): Record<string, string> {
   const values: Record<string, string> = {};
