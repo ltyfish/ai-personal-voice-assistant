@@ -152,6 +152,7 @@ function appendDesktopTurnOptions(form: FormData, text = "") {
   form.set("bridgeAvailable", String(status().bridgeOnline));
   form.set("useSnapshot", "false");
   form.set("maxWords", "18");
+  form.set("sttMode", "fast");
   form.set("enabledTools", JSON.stringify(text ? desktopEnabledTools(text, status().bridgeOnline) : desktopAudioTools(status().bridgeOnline)));
 }
 

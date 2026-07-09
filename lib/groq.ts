@@ -1,5 +1,6 @@
 import Groq from "groq-sdk";
 import { MODEL_IDS } from "./models";
+import { DEFAULT_STT_MODEL } from "./stt-model";
 
 if (!process.env.GROQ_API_KEY) {
   throw new Error("GROQ_API_KEY is not set. Copy .env.local.example to .env.local.");
@@ -18,7 +19,7 @@ export const DEFAULT_MODEL = "llama-3.3-70b-versatile";
 export const FALLBACK_MODELS = MODEL_IDS;
 // whisper-large-v3 is Groq's most ACCURATE STT (≈8.4% WER) — a bit slower than
 // the "-turbo" variant but noticeably better on names/commands. Same free tier.
-export const STT_MODEL = "whisper-large-v3";
+export const STT_MODEL = DEFAULT_STT_MODEL;
 
 // Detect the real audio container from the file's magic bytes, so we hand Groq
 // a filename + content-type that match the actual data. Browsers vary in what

@@ -1,9 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
 import { toFile } from "groq-sdk";
-import { groq, STT_MODEL, FALLBACK_MODELS, classifyRateLimit, sniffAudio } from "@/lib/groq";
+import { groq, FALLBACK_MODELS, classifyRateLimit, sniffAudio } from "@/lib/groq";
 import { runAgent, warmModels } from "@/lib/agent";
 import { recordActivity } from "@/lib/activity";
 import { addGroqUsage } from "@/lib/mail/blobs";
+import { selectSttModel } from "@/lib/stt-model";
 
 export const runtime = "nodejs";
 // 60s (Vercel's Hobby ceiling) gives the agent room to fail over across a few
@@ -22,6 +23,7 @@ export async function POST(req: NextRequest) {
     let browserOpen = false; // a controlled browser is open → de-keyword page instructions
     let enabledTools: string[] | undefined; // client tool picker allow-list
     let bridgeAvailable = false; // is the user's computer connected this turn?
+    let sttMode = "default";
     const contentType = req.headers.get("content-type") || "";
 
     if (contentType.includes("application/json")) {
@@ -59,6 +61,7 @@ export async function POST(req: NextRequest) {
         }
       }
       bridgeAvailable = String(form.get("bridgeAvailable")) === "true";
+      sttMode = String(form.get("sttMode") || "default");
       if (!(audio instanceof Blob)) {
         return NextResponse.json({ error: "no audio provided" }, { status: 400 });
       }
@@ -87,7 +90,7 @@ export async function POST(req: NextRequest) {
       const file = await toFile(bytes, name, { type });
       const transcription = await groq.audio.transcriptions.create({
         file,
-        model: STT_MODEL,
+        model: selectSttModel(sttMode),
         language: "en", // force English so it doesn't mis-detect other languages
         temperature: 0, // deterministic, most-likely transcription
       });
