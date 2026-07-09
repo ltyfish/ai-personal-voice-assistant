@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { selectPetVisualState } from "../dist/shared/pet-visual-state.js";
+import {
+  selectPetVisualState,
+  shouldRestoreIdleAfterDrag,
+} from "../dist/shared/pet-visual-state.js";
 
 test("dragging overrides every other visual state", () => {
   assert.equal(
@@ -47,4 +50,11 @@ test("maps pending action and activity modes to visual states", () => {
     selectPetVisualState({ dragging: false, transient: null, hasPendingAction: false, mode: "offline" }),
     "idle",
   );
+});
+
+test("restores idle only when leaving the dragging state", () => {
+  assert.equal(shouldRestoreIdleAfterDrag("dragging", "idle"), true);
+  assert.equal(shouldRestoreIdleAfterDrag("thinking", "idle"), false);
+  assert.equal(shouldRestoreIdleAfterDrag("dragging", "thinking"), false);
+  assert.equal(shouldRestoreIdleAfterDrag(null, "idle"), false);
 });

@@ -49,7 +49,7 @@ const app = read("desktop/src/renderer/App.tsx");
 const wake = read("desktop/src/renderer/wake.ts");
 const voice = read("desktop/src/renderer/voice.ts");
 const localUpdater = read("scripts/update-desktop-local.ps1");
-const petEnvExample = read("jarvis-pet.env.example");
+const petEnvExample = read(existsSync("jarvis-pet.env.example") ? "jarvis-pet.env.example" : "Images/jarvis-pet.env.example");
 
 assert(/contextIsolation:\s*true/.test(main), "BrowserWindow must enable contextIsolation");
 assert(/nodeIntegration:\s*false/.test(main), "BrowserWindow must disable nodeIntegration");
@@ -136,6 +136,9 @@ assert(/onError=/.test(app), "renderer must fall back when an override image fai
 assert(/selectRandomPetImage/.test(app), "renderer must randomly select from image pools");
 assert(/lastPetImagesRef/.test(app), "renderer must remember the previous image per state");
 assert(/failedPetImagesRef/.test(app), "renderer must exclude failed remote images");
+assert(/previousPetVisualStateRef/.test(app), "renderer must remember the previous visual state");
+assert(/shouldRestoreIdleAfterDrag/.test(app), "renderer must restore idle after dragging");
+assert(/lastPetImagesRef\.current\.idle/.test(app), "renderer must reuse the selected idle image");
 assert(/300_000/.test(app), "idle image pool must rotate every five minutes");
 assert(/setInterval/.test(app), "renderer must schedule idle image rotation");
 assert(/event\.key === "Enter" && !event\.shiftKey/.test(app), "plain Enter must submit desktop prompts");

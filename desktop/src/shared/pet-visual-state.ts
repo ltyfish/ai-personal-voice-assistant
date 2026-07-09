@@ -16,3 +16,10 @@ export function selectPetVisualState(input: PetVisualStateInput): PetVisualState
   if (input.mode === "speaking") return "talking";
   return "idle";
 }
+
+export function shouldRestoreIdleAfterDrag(
+  previous: PetVisualState | null,
+  current: PetVisualState,
+) {
+  return previous === "dragging" && current === "idle";
+}

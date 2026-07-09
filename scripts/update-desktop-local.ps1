@@ -10,6 +10,9 @@ $unpackedDir = Join-Path $desktopRelease "win-unpacked"
 $exePath = Join-Path $InstallDir "JARVIS Desktop.exe"
 $installedPetEnv = Join-Path $InstallDir "jarvis-pet.env"
 $petEnvExample = Join-Path $repoRoot "jarvis-pet.env.example"
+if (-not (Test-Path $petEnvExample)) {
+  $petEnvExample = Join-Path $repoRoot "Images\jarvis-pet.env.example"
+}
 $startMenuShortcut = Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs\JARVIS Desktop.lnk"
 
 Set-Location $repoRoot

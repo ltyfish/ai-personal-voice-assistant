@@ -1,6 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { PointerEvent as ReactPointerEvent } from "react";
-import { selectPetVisualState } from "../shared/pet-visual-state.js";
+import {
+  selectPetVisualState,
+  shouldRestoreIdleAfterDrag,
+} from "../shared/pet-visual-state.js";
 import { selectRandomPetImage } from "../shared/random-pet-image.js";
 import type {
   DesktopLocalActionIntent,
@@ -59,6 +62,7 @@ export default function App() {
   const transientTimerRef = useRef<number | null>(null);
   const lastPetImagesRef = useRef<Partial<Record<PetVisualState, string>>>({});
   const failedPetImagesRef = useRef<Partial<Record<PetVisualState, Set<string>>>>({});
+  const previousPetVisualStateRef = useRef<PetVisualState | null>(null);
   const sleeping = mode === "sleeping";
   const petVisualState = selectPetVisualState({
     dragging,
@@ -102,6 +106,12 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    const previous = previousPetVisualStateRef.current;
+    previousPetVisualStateRef.current = petVisualState;
+    if (shouldRestoreIdleAfterDrag(previous, petVisualState)) {
+      setPetImage(lastPetImagesRef.current.idle || bundledPetImages.idle);
+      return;
+    }
     choosePetImage(petVisualState);
   }, [choosePetImage, petVisualState]);
 
