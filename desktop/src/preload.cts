@@ -3,6 +3,7 @@ import type { IpcRendererEvent } from "electron";
 import type {
   AudioTurnInput,
   DesktopConfig,
+  DesktopLaunchResult,
   DesktopLocalActionIntent,
   JarvisDesktopApi,
   PetImagePools,
@@ -29,7 +30,7 @@ const api: JarvisDesktopApi = {
   setPromptDockOpen: (open: boolean) => ipcRenderer.invoke("desktop:setPromptDockOpen", open),
   getModelUrl: (name: string) => ipcRenderer.invoke("desktop:getModelUrl", name),
   restartBridge: () => ipcRenderer.invoke("desktop:restartBridge"),
-  openFullJarvis: () => ipcRenderer.invoke("desktop:openFullJarvis"),
+  openFullJarvis: (): Promise<DesktopLaunchResult> => ipcRenderer.invoke("desktop:openFullJarvis"),
 };
 
 contextBridge.exposeInMainWorld("jarvisDesktop", api);

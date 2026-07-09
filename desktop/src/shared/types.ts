@@ -69,6 +69,10 @@ export type DesktopActionResult = {
   output?: string;
 };
 
+export type DesktopLaunchResult =
+  | { ok: true }
+  | { ok: false; error: string };
+
 export type JarvisDesktopApi = {
   getStatus(): Promise<DesktopStatus>;
   getPetImages(): Promise<PetImagePools>;
@@ -83,7 +87,7 @@ export type JarvisDesktopApi = {
   setPromptDockOpen(open: boolean): Promise<void>;
   getModelUrl(name: string): Promise<string>;
   restartBridge(): Promise<DesktopStatus>;
-  openFullJarvis(): Promise<void>;
+  openFullJarvis(): Promise<DesktopLaunchResult>;
 };
 
 declare global {

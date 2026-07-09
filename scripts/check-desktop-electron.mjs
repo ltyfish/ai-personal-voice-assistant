@@ -97,6 +97,8 @@ assert(/restartBridge/.test(bridge), "bridge module must export restartBridge");
 assert(/status\s*===\s*401/.test(bridge), "bridge presence must treat auth-protected health as online");
 assert(/scripts[\\\\/]bridge[\\\\/]server\.mjs/.test(bridge), "bridge manager must launch existing bridge server");
 assert(/desktop:restartBridge/.test(main), "main process must expose restart bridge IPC");
+assert(/desktop:openFullJarvis/.test(main), "main process must expose full website launch IPC");
+assert(/DesktopLaunchResult/.test(types), "website launch must return a typed success or error result");
 assert(/desktop:getWindowBounds/.test(main), "main process must expose window bounds for manual orb dragging");
 assert(/desktop:setWindowBounds/.test(main), "main process must expose window movement for manual orb dragging");
 assert(/desktop:setPromptDockOpen/.test(main), "main process must resize the transparent pet when the prompt dock opens");
@@ -134,6 +136,8 @@ assert(/close\(\)/.test(app) && /cancelAnimationFrame/.test(app), "renderer must
 assert(/ensureRunning/.test(wake) && /ensureRunning/.test(app), "renderer must resume wake audio from a user gesture");
 assert(/manualListen/.test(app) && /directMicStream/.test(app), "renderer must provide a direct manual listening fallback");
 assert(/>\s*Listen\s*</.test(app), "renderer must expose a Listen button for manual voice capture");
+assert(/>\s*Open JARVIS\s*</.test(app), "renderer must expose a visible Open JARVIS button");
+assert(/openFullJarvis/.test(app), "Open JARVIS button must use the preload IPC API");
 assert(/pendingAction/.test(app), "renderer must show pending local action approvals");
 assert(/runLocalAction/.test(app), "renderer must run confirmed local actions through IPC");
 assert(/selectPetVisualState/.test(app), "renderer must select explicit pet visual states");

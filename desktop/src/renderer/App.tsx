@@ -463,6 +463,15 @@ export default function App() {
     }
   }
 
+  async function openJarvis() {
+    const result = await window.jarvisDesktop.openFullJarvis();
+    if (!result.ok) {
+      setPromptOpen(true);
+      setReply(result.error || "Could not open JARVIS.");
+      setMode("offline");
+    }
+  }
+
   async function continuePendingAction() {
     if (!pendingAction || actionBusy) return;
     setActionBusy(true);
@@ -559,6 +568,7 @@ export default function App() {
             <button onClick={manualListen} disabled={mode === "thinking" || mode === "speaking" || !!recorderRef.current}>
               Listen
             </button>
+            <button onClick={openJarvis}>Open JARVIS</button>
             <button
               onClick={() => {
                 stopPendingAction();

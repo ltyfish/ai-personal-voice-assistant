@@ -444,7 +444,18 @@ ipcMain.handle("desktop:setPromptDockOpen", (_event, open: boolean) => {
 ipcMain.handle("desktop:getModelUrl", (_event, name: string) => {
   return pathToFileURL(bundledModelPath(name)).toString();
 });
-ipcMain.handle("desktop:openFullJarvis", () => shell.openExternal(loadConfig().backendUrl || CLOUD_BACKEND_URL));
+ipcMain.handle("desktop:openFullJarvis", async () => {
+  try {
+    await shell.openExternal(loadConfig().backendUrl || CLOUD_BACKEND_URL);
+    return { ok: true };
+  } catch (error) {
+    logDesktop("open full JARVIS failed", error);
+    return {
+      ok: false,
+      error: error instanceof Error ? error.message : "Could not open JARVIS.",
+    };
+  }
+});
 ipcMain.handle("desktop:restartBridge", async () => {
   restartBridge();
   bridgeIsOnline = await bridgeOnline();
