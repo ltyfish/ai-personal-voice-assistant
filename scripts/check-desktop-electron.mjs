@@ -47,6 +47,7 @@ const bridge = read("desktop/src/main/bridge.ts");
 const viteConfig = read("desktop/vite.config.ts");
 const app = read("desktop/src/renderer/App.tsx");
 const appCss = read("desktop/src/renderer/app.css");
+const voiceRoute = read("app/api/voice/route.ts");
 const wake = read("desktop/src/renderer/wake.ts");
 const voice = read("desktop/src/renderer/voice.ts");
 const localUpdater = read("scripts/update-desktop-local.ps1");
@@ -84,6 +85,10 @@ assert(/enabledTools:\s*desktopEnabledTools/.test(main), "desktop typed turns sh
 assert(/warmVoiceBackend/.test(main) && /warm:\s*true/.test(main), "desktop should warm the voice backend on startup");
 assert(/desktop:runTextTurn/.test(main), "main process must expose runTextTurn IPC");
 assert(/desktop:runAudioTurn/.test(main), "main process must expose audio turns for wake-triggered commands");
+assert(/requestMs/.test(main) && /timings/.test(main), "desktop must log voice request stage timings");
+assert(/sttMs/.test(voiceRoute), "voice route must report transcription timing");
+assert(/agentMs/.test(voiceRoute), "voice route must report agent timing");
+assert(/totalMs/.test(voiceRoute), "voice route must report total timing");
 assert(/desktop:runLocalAction/.test(main), "main process must expose confirmed local bridge actions");
 assert(/desktop:getModelUrl/.test(main), "main process must expose packaged wake model URLs");
 assert(/next-app[\\\\/]public[\\\\/]models/.test(main), "packaged wake models must load from bundled public/models");

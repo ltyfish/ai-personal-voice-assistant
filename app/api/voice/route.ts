@@ -15,6 +15,9 @@ export const maxDuration = 60;
 // Accepts either an audio file (multipart) to transcribe + act on,
 // or a JSON { text } to skip STT (useful for typed testing).
 export async function POST(req: NextRequest) {
+  const requestStartedAt = performance.now();
+  let sttMs = 0;
+  let agentMs = 0;
   try {
     let userText = "";
     let userProfile = ""; // user's Windows home dir, for run_shell paths
@@ -88,12 +91,14 @@ export async function POST(req: NextRequest) {
           .toString("hex")}`
       );
       const file = await toFile(bytes, name, { type });
+      const sttStartedAt = performance.now();
       const transcription = await groq.audio.transcriptions.create({
         file,
         model: selectSttModel(sttMode),
         language: "en", // force English so it doesn't mis-detect other languages
         temperature: 0, // deterministic, most-likely transcription
       });
+      sttMs = Math.round(performance.now() - sttStartedAt);
       userText = transcription.text.trim();
     }
 
@@ -104,8 +109,10 @@ export async function POST(req: NextRequest) {
       );
     }
 
+    const agentStartedAt = performance.now();
     const { reply, actions, model, models, exhausted, usage, limits, routed, routing } =
       await runAgent(userText, { userProfile, maxWords, useSnapshot, enabledTools, bridgeAvailable });
+    agentMs = Math.round(performance.now() - agentStartedAt);
 
     // Persist this cloud turn to the activity log: powers both short-term recall
     // (injected as a volatile tail block on the next turn) and the Activity card.
@@ -144,6 +151,11 @@ export async function POST(req: NextRequest) {
       usage,
       routed,
       routing,
+      timings: {
+        sttMs,
+        agentMs,
+        totalMs: Math.round(performance.now() - requestStartedAt),
+      },
     });
   } catch (err: any) {
     const is429 =

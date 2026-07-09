@@ -185,6 +185,7 @@ async function postVoiceForm(form: FormData): Promise<VoiceTurnResult> {
       reply: data.reply || data.error || "No reply.",
       model: data.model,
       actions: data.actions,
+      timings: data.timings,
       error: data.error,
     };
   } catch (err) {
@@ -451,13 +452,20 @@ ipcMain.handle("desktop:restartBridge", async () => {
 });
 ipcMain.handle("desktop:runLocalAction", (_event, intent: DesktopLocalActionIntent) => runBridgeAction(intent));
 ipcMain.handle("desktop:runAudioTurn", async (_event, input: AudioTurnInput): Promise<VoiceTurnResult> => {
+  const requestStartedAt = performance.now();
   const bytes = input.bytes instanceof ArrayBuffer ? input.bytes : new Uint8Array(input.bytes).buffer;
   const type = input.type || "audio/webm";
   const form = new FormData();
   bridgeIsOnline = await bridgeOnline();
   form.set("audio", new Blob([bytes], { type }), type.includes("wav") ? "desktop.wav" : "desktop.webm");
   appendDesktopTurnOptions(form);
-  return postVoiceForm(form);
+  const result = await postVoiceForm(form);
+  const requestMs = Math.round(performance.now() - requestStartedAt);
+  const timings = result.timings;
+  logDesktop(
+    `voice timings requestMs=${requestMs} sttMs=${timings?.sttMs ?? "?"} agentMs=${timings?.agentMs ?? "?"} totalMs=${timings?.totalMs ?? "?"}`,
+  );
+  return result;
 });
 ipcMain.handle("desktop:runTextTurn", async (_event, text: string): Promise<VoiceTurnResult> => {
   const trimmed = text.trim();
@@ -488,6 +496,7 @@ ipcMain.handle("desktop:runTextTurn", async (_event, text: string): Promise<Voic
       reply: data.reply || "No reply.",
       model: data.model,
       actions: data.actions,
+      timings: data.timings,
     };
   } catch (err) {
     const error = err instanceof Error && err.name === "AbortError"

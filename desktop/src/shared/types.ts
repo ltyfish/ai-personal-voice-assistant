@@ -38,6 +38,11 @@ export type VoiceTurnResult = {
   reply: string;
   model?: string;
   actions?: unknown[];
+  timings?: {
+    sttMs: number;
+    agentMs: number;
+    totalMs: number;
+  };
   error?: string;
 };
 
