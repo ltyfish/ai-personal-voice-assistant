@@ -2,7 +2,20 @@
 
 ## Goal
 
-Deliver every successful `main` branch desktop build through GitHub Releases and let packaged JARVIS Desktop installations notify the user, download the update, and install it only after the user clicks **Restart and update**.
+Deliver every successful `main` branch desktop build through GitHub Releases, let users install the floating JARVIS Pet from the JARVIS website, and let packaged installations notify the user, download the update, and install it only after the user clicks **Restart and update**.
+
+## Website Installation Entry Point
+
+The JARVIS website exposes a visible **Download JARVIS Pet for Windows** action. It links to a stable repository release URL that resolves to the newest Windows installer rather than embedding a version-specific filename in the web bundle.
+
+The download action:
+
+- Identifies the artifact as a Windows desktop companion.
+- Explains that the pet remains connected to the cloud-hosted JARVIS website and shared data.
+- Opens the GitHub-hosted installer download without proxying the executable through Vercel.
+- Remains useful before the first updater-enabled release by showing a clear unavailable state if no release artifact has been published yet.
+
+Installing the downloaded executable creates the same transparent, always-on-top floating pet. The website remains the full interface; the pet is a lightweight voice/text entry point and local-action bridge.
 
 ## Release Architecture
 
