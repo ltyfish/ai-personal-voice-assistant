@@ -18,7 +18,8 @@
     "models:check": "node scripts/check-models.mjs",
     "desktop:check": "node scripts/check-desktop-electron.mjs",
     "desktop:dev": "npm --prefix desktop run dev",
-    "desktop:build": "npm --prefix desktop run build"
+    "desktop:build": "npm --prefix desktop run build",
+    "desktop:update": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/update-desktop-local.ps1"
   },
   "dependencies": {
     "@dnd-kit/core": "^6.3.1",

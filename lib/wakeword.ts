@@ -79,14 +79,20 @@ export class WakeWordEngine {
   }
 
   async start() {
+    const modelUrl = async (name: string) => {
+      const desktopApi = (globalThis as unknown as {
+        jarvisDesktop?: { getModelUrl?: (name: string) => Promise<string> };
+      }).jarvisDesktop;
+      return desktopApi?.getModelUrl ? await desktopApi.getModelUrl(name) : `/models/${name}`;
+    };
     [this.mel, this.emb, this.wake] = await Promise.all([
-      ort.InferenceSession.create("/models/melspectrogram.onnx", {
+      ort.InferenceSession.create(await modelUrl("melspectrogram.onnx"), {
         executionProviders: ["wasm"],
       }),
-      ort.InferenceSession.create("/models/embedding_model.onnx", {
+      ort.InferenceSession.create(await modelUrl("embedding_model.onnx"), {
         executionProviders: ["wasm"],
       }),
-      ort.InferenceSession.create("/models/jarvis.onnx", {
+      ort.InferenceSession.create(await modelUrl("jarvis.onnx"), {
         executionProviders: ["wasm"],
       }),
     ]);

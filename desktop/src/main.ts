@@ -1,8 +1,18 @@
 import { BrowserWindow, Menu, Tray, app, ipcMain, nativeImage, session, shell } from "electron";
-import { appendFileSync, mkdirSync } from "node:fs";
+import type { Rectangle } from "electron";
+import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { fileURLToPath } from "node:url";
-import type { DesktopConfig, DesktopStatus, PetMode, VoiceTurnResult } from "./shared/types.js";
+import type {
+  AudioTurnInput,
+  DesktopActionResult,
+  DesktopConfig,
+  DesktopLocalActionIntent,
+  DesktopStatus,
+  PetMode,
+  VoiceTurnResult,
+} from "./shared/types.js";
 import { bridgeOnline, restartBridge, startBridge, stopBridge } from "./main/bridge.js";
 import { CLOUD_BACKEND_URL, loadConfig, saveConfig } from "./main/config.js";
 import { RUNTIME_URL, startRuntime, stopRuntime, waitForRuntime } from "./main/runtime.js";
@@ -56,6 +66,155 @@ function shouldStartLocalRuntime(backendUrl: string) {
   return /^https?:\/\/(127\.0\.0\.1|localhost):3100\b/i.test(backendUrl);
 }
 
+function bundledModelPath(name: string) {
+  const safeName = name.replace(/[^a-z0-9_.-]/gi, "");
+  if (!app.isPackaged) return join(mainDir, "../../public/models", safeName);
+  return join(process.resourcesPath, "next-app/public/models", safeName);
+}
+
+function bridgeTokenPath() {
+  if (!app.isPackaged) return join(mainDir, "../../scripts/bridge/.bridge-token");
+  return join(process.resourcesPath, "scripts/bridge/.bridge-token");
+}
+
+function readBridgeToken() {
+  const path = bridgeTokenPath();
+  if (!existsSync(path)) return "";
+  return readFileSync(path, "utf8").trim();
+}
+
+function backendUrl() {
+  return loadConfig().backendUrl || CLOUD_BACKEND_URL;
+}
+
+function desktopEnabledTools(text: string, bridgeAvailable: boolean) {
+  const t = text.toLowerCase();
+  const tools = new Set<string>();
+
+  if (/\b(task|todo|subtask|complete|due)\b/.test(t)) {
+    ["create_task", "update_task", "delete_task", "complete_all", "list_tasks", "add_subtask", "update_subtask", "delete_subtask", "list_subtasks"].forEach((tool) =>
+      tools.add(tool),
+    );
+  }
+  if (/\b(calendar|event|schedule|meeting|appointment)\b/.test(t)) {
+    ["create_event", "update_event", "delete_event", "list_events"].forEach((tool) => tools.add(tool));
+  }
+  if (/\b(email|mail|inbox|message|contact|telegram|whatsapp|send)\b/.test(t)) {
+    ["list_emails", "mark_emails_reviewed", "fetch_emails_now", "send_message", "list_contacts"].forEach((tool) => tools.add(tool));
+  }
+  if (/\b(note|remember|saved|search notes?)\b/.test(t)) {
+    ["create_note", "search_notes", "update_note", "delete_note"].forEach((tool) => tools.add(tool));
+  }
+  if (bridgeAvailable && /\b(open|launch|folder|app|shutdown|restart|powershell|shell|command|run)\b/.test(t)) {
+    ["open_app", "shutdown_computer", "run_shell"].forEach((tool) => tools.add(tool));
+  }
+
+  return [...tools];
+}
+
+function desktopAudioTools(bridgeAvailable: boolean) {
+  const tools = [
+    "list_tasks",
+    "list_events",
+    "list_emails",
+    "search_notes",
+    "send_message",
+    "list_contacts",
+  ];
+  if (bridgeAvailable) tools.push("open_app", "shutdown_computer", "run_shell");
+  return tools;
+}
+
+function appendDesktopTurnOptions(form: FormData, text = "") {
+  form.set("bridgeAvailable", String(status().bridgeOnline));
+  form.set("useSnapshot", "false");
+  form.set("maxWords", "18");
+  form.set("enabledTools", JSON.stringify(text ? desktopEnabledTools(text, status().bridgeOnline) : desktopAudioTools(status().bridgeOnline)));
+}
+
+async function warmVoiceBackend() {
+  try {
+    await fetch(`${backendUrl()}/api/voice`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ warm: true }),
+    });
+    logDesktop("voice backend warmed");
+  } catch (error) {
+    logDesktop("voice backend warm failed", error);
+  }
+}
+
+async function postVoiceForm(form: FormData): Promise<VoiceTurnResult> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 75_000);
+  try {
+    const res = await fetch(`${backendUrl()}/api/voice`, {
+      method: "POST",
+      signal: controller.signal,
+      body: form,
+    });
+    const data = (await res.json().catch(() => ({}))) as Partial<VoiceTurnResult>;
+    if (!res.ok) return { reply: "", error: data.error || `JARVIS returned ${res.status}` };
+    return {
+      transcript: data.transcript || "",
+      reply: data.reply || data.error || "No reply.",
+      model: data.model,
+      actions: data.actions,
+      error: data.error,
+    };
+  } catch (err) {
+    const error = err instanceof Error && err.name === "AbortError"
+      ? "JARVIS timed out after 75 seconds."
+      : (err as Error).message || "Could not reach JARVIS.";
+    return { reply: "", error };
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function runBridgeAction(intent: DesktopLocalActionIntent): Promise<DesktopActionResult> {
+  const token = readBridgeToken();
+  if (!token) return { ok: false, message: "Bridge token is missing. Restart the bridge from the pet." };
+  if (intent.local_action === "run_shell" && !intent.command) {
+    return { ok: false, message: "No command was provided." };
+  }
+  const body = {
+    action: intent.local_action,
+    target: intent.target || intent.command || "",
+    ...(intent.command ? { command: intent.command } : {}),
+    ...(intent.fallback ? { fallback: intent.fallback } : {}),
+    ...(intent.only ? { only: intent.only } : {}),
+    ...(intent.autoSend ? { autoSend: true } : {}),
+    ...(intent.cancel ? { cancel: true } : {}),
+    ...(intent.delaySec != null ? { delaySec: intent.delaySec } : {}),
+  };
+  try {
+    const res = await fetch("http://127.0.0.1:7777/run", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+      body: JSON.stringify(body),
+    });
+    const data = await res.json().catch(() => ({}));
+    const output = [data.stdout, data.stderr].filter(Boolean).join("\n").trim();
+    if (!res.ok) return { ok: false, message: data.error || `Bridge error (${res.status}).`, output };
+    if (intent.local_action === "run_shell") return { ok: true, message: output ? "Command finished." : "Command finished (no output).", output };
+    if (intent.local_action === "shutdown") {
+      if (intent.cancel) return { ok: true, message: "Cancelled the shutdown." };
+      const seconds = intent.delaySec ?? 0;
+      return { ok: true, message: seconds > 0 ? `Shutting down in ${seconds} seconds.` : "Shutting down now." };
+    }
+    if (intent.local_action === "whatsapp_send") {
+      return { ok: true, message: data.autoSend ? `Sending your ${intent.label} message.` : `Opened ${intent.label} with the message ready.` };
+    }
+    if (data.opened === "folder") return { ok: true, message: `Opening the ${intent.label} folder.` };
+    if (data.opened === "website") return { ok: true, message: `${intent.label} is not installed, opening the website.` };
+    return { ok: true, message: `Opening ${intent.label}.` };
+  } catch (error) {
+    return { ok: false, message: error instanceof Error ? error.message : "Could not reach the bridge." };
+  }
+}
+
 function applyStartup(enabled: boolean) {
   app.setLoginItemSettings({
     openAtLogin: enabled && app.isPackaged,
@@ -71,10 +230,28 @@ function saveWindowBounds() {
 function setWindowForMode(mode: PetMode) {
   if (!petWindow) return;
   savingProgrammaticBounds = true;
-  const [width, height] = mode === "sleeping" ? [112, 112] : [380, 440];
-  petWindow.setMinimumSize(mode === "sleeping" ? 86 : 320, mode === "sleeping" ? 86 : 360);
+  const [width, height] = mode === "sleeping" ? [250, 190] : [380, 440];
+  petWindow.setMinimumSize(mode === "sleeping" ? 210 : 340, mode === "sleeping" ? 160 : 360);
   petWindow.setSize(width, height, true);
   petWindow.center();
+  setTimeout(() => {
+    savingProgrammaticBounds = false;
+  }, 200);
+}
+
+function setPromptDockOpen(open: boolean) {
+  if (!petWindow) return;
+  savingProgrammaticBounds = true;
+  const current = petWindow.getBounds();
+  const [width, height] = open ? [380, 440] : [360, 300];
+  const centerX = current.x + current.width / 2;
+  petWindow.setMinimumSize(open ? 340 : 320, open ? 360 : 260);
+  petWindow.setBounds({
+    x: Math.round(centerX - width / 2),
+    y: current.y,
+    width,
+    height,
+  });
   setTimeout(() => {
     savingProgrammaticBounds = false;
   }, 200);
@@ -83,24 +260,25 @@ function setWindowForMode(mode: PetMode) {
 function showPetWindow() {
   if (!petWindow || petWindow.isDestroyed()) return;
   if (petWindow.isMinimized()) petWindow.restore();
-  petWindow.show();
-  petWindow.focus();
+  petWindow.setAlwaysOnTop(true, "screen-saver");
+  petWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+  petWindow.showInactive();
   petWindow.moveTop();
 }
 
 function createPetWindow() {
   const cfg = loadConfig();
-  const transparentPet = process.env.JARVIS_TRANSPARENT_PET === "1";
   logDesktop("creating pet window");
   petWindow = new BrowserWindow({
-    width: cfg.petMode === "sleeping" ? 112 : cfg.bounds?.width ?? 380,
-    height: cfg.petMode === "sleeping" ? 112 : cfg.bounds?.height ?? 440,
+    width: cfg.petMode === "sleeping" ? 250 : cfg.bounds?.width ?? 380,
+    height: cfg.petMode === "sleeping" ? 190 : cfg.bounds?.height ?? 440,
     x: cfg.bounds?.x,
     y: cfg.bounds?.y,
-    transparent: transparentPet,
-    backgroundColor: transparentPet ? "#00000000" : "#08080a",
-    frame: !transparentPet,
-    alwaysOnTop: transparentPet,
+    transparent: true,
+    backgroundColor: "#00000000",
+    frame: false,
+    alwaysOnTop: true,
+    hasShadow: false,
     resizable: true,
     show: true,
     paintWhenInitiallyHidden: true,
@@ -112,6 +290,8 @@ function createPetWindow() {
     },
   });
   logDesktop("pet window constructed");
+  petWindow.setAlwaysOnTop(true, "screen-saver");
+  petWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
   setWindowForMode(cfg.petMode);
   showPetWindow();
   logDesktop(`loading renderer ${rendererUrl()}`);
@@ -154,12 +334,14 @@ function createPetWindow() {
   });
   petWindow.on("moved", saveWindowBounds);
   petWindow.on("resized", saveWindowBounds);
-  petWindow.on("close", (event) => {
-    if (!isQuitting) {
-      event.preventDefault();
-      petWindow?.hide();
-    }
+  petWindow.on("closed", () => {
+    petWindow = null;
   });
+  setInterval(() => {
+    if (!petWindow || petWindow.isDestroyed()) return;
+    petWindow.setAlwaysOnTop(true, "screen-saver");
+    petWindow.moveTop();
+  }, 5000).unref();
 }
 
 function createTray() {
@@ -205,7 +387,10 @@ function configureSessionPermissions() {
   });
 }
 
-ipcMain.handle("desktop:getStatus", () => status());
+ipcMain.handle("desktop:getStatus", async () => {
+  bridgeIsOnline = await bridgeOnline();
+  return status();
+});
 ipcMain.handle("desktop:saveConfig", (_event, patch: Partial<DesktopConfig>) => {
   const next = saveConfig(patch);
   if (typeof patch.startupEnabled === "boolean") applyStartup(patch.startupEnabled);
@@ -217,29 +402,57 @@ ipcMain.handle("desktop:setPetMode", (_event, mode: PetMode) => {
   setWindowForMode(mode);
   return next;
 });
+ipcMain.handle("desktop:getWindowBounds", () => petWindow?.getBounds() ?? { x: 0, y: 0, width: 340, height: 360 });
+ipcMain.handle("desktop:setWindowBounds", (_event, bounds: Rectangle) => {
+  if (!petWindow) return;
+  petWindow.setBounds({
+    x: Math.round(bounds.x),
+    y: Math.round(bounds.y),
+    width: Math.round(bounds.width),
+    height: Math.round(bounds.height),
+  });
+});
+ipcMain.handle("desktop:setPromptDockOpen", (_event, open: boolean) => {
+  setPromptDockOpen(open);
+});
+ipcMain.handle("desktop:getModelUrl", (_event, name: string) => {
+  return pathToFileURL(bundledModelPath(name)).toString();
+});
 ipcMain.handle("desktop:openFullJarvis", () => shell.openExternal(loadConfig().backendUrl || CLOUD_BACKEND_URL));
 ipcMain.handle("desktop:restartBridge", async () => {
   restartBridge();
   bridgeIsOnline = await bridgeOnline();
   return status();
 });
+ipcMain.handle("desktop:runLocalAction", (_event, intent: DesktopLocalActionIntent) => runBridgeAction(intent));
+ipcMain.handle("desktop:runAudioTurn", async (_event, input: AudioTurnInput): Promise<VoiceTurnResult> => {
+  const bytes = input.bytes instanceof ArrayBuffer ? input.bytes : new Uint8Array(input.bytes).buffer;
+  const type = input.type || "audio/webm";
+  const form = new FormData();
+  bridgeIsOnline = await bridgeOnline();
+  form.set("audio", new Blob([bytes], { type }), type.includes("wav") ? "desktop.wav" : "desktop.webm");
+  appendDesktopTurnOptions(form);
+  return postVoiceForm(form);
+});
 ipcMain.handle("desktop:runTextTurn", async (_event, text: string): Promise<VoiceTurnResult> => {
   const trimmed = text.trim();
   if (!trimmed) return { reply: "I didn't catch that." };
 
-  const backendUrl = loadConfig().backendUrl || CLOUD_BACKEND_URL;
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 75_000);
   try {
-    logDesktop(`voice turn start backend=${backendUrl}`);
-    const res = await fetch(`${backendUrl}/api/voice`, {
+    bridgeIsOnline = await bridgeOnline();
+    logDesktop(`voice turn start backend=${backendUrl()}`);
+    const res = await fetch(`${backendUrl()}/api/voice`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       signal: controller.signal,
       body: JSON.stringify({
         text: trimmed,
         bridgeAvailable: status().bridgeOnline,
+        maxWords: 18,
         useSnapshot: false,
+        enabledTools: desktopEnabledTools(trimmed, status().bridgeOnline),
       }),
     });
     const data = (await res.json().catch(() => ({}))) as Partial<VoiceTurnResult>;
@@ -271,6 +484,7 @@ app.whenReady().then(async () => {
   createTray();
   if (shouldStartLocalRuntime(cfg.backendUrl)) startRuntime();
   startBridge();
+  setTimeout(() => void warmVoiceBackend(), 1500);
   Promise.all([shouldStartLocalRuntime(cfg.backendUrl) ? waitForRuntime(10_000) : Promise.resolve(false), bridgeOnline()])
     .then(([nextRuntimeOnline, nextBridgeOnline]) => {
       runtimeOnline = nextRuntimeOnline;
@@ -297,4 +511,6 @@ app.on("before-quit", () => {
   stopRuntime();
 });
 
-app.on("window-all-closed", () => {});
+app.on("window-all-closed", () => {
+  app.quit();
+});

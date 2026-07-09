@@ -1,15 +1,63 @@
 import { useEffect, useRef, useState } from "react";
-import type { DesktopStatus, PetMode } from "../shared/types.js";
+import type { PointerEvent as ReactPointerEvent } from "react";
+import type { DesktopLocalActionIntent, DesktopStatus, PetMode, VoiceTurnResult, WindowBounds } from "../shared/types.js";
+import approvalPet from "./assets/pet/approval.png";
+import deniedPet from "./assets/pet/denied.png";
+import idlePet from "./assets/pet/idle.png";
+import listeningPet from "./assets/pet/listening.png";
+import noPet from "./assets/pet/no.png";
+import stoppedPet from "./assets/pet/stopped.png";
+import talkingPet from "./assets/pet/talking.png";
+import thinkingPet from "./assets/pet/thinking.png";
 import { speak, stopSpeaking } from "./voice.js";
 import { startWakeListener, type WakeHandle } from "./wake.js";
 
 export default function App() {
   const wakeRef = useRef<WakeHandle | null>(null);
+  const recorderRef = useRef<MediaRecorder | null>(null);
+  const dragRef = useRef<{
+    pointerId: number;
+    startScreenX: number;
+    startScreenY: number;
+    bounds: WindowBounds;
+    moved: boolean;
+  } | null>(null);
   const [status, setStatus] = useState<DesktopStatus | null>(null);
   const [mode, setMode] = useState<PetMode>("idle");
+  const [promptOpen, setPromptOpen] = useState(false);
   const [prompt, setPrompt] = useState("");
+  const [transcript, setTranscript] = useState("");
   const [reply, setReply] = useState("");
   const [wakeScore, setWakeScore] = useState(0);
+  const [wakeIssue, setWakeIssue] = useState("");
+  const [pendingAction, setPendingAction] = useState<DesktopLocalActionIntent | null>(null);
+  const [actionRows, setActionRows] = useState<string[]>([]);
+  const [actionBusy, setActionBusy] = useState(false);
+  const sleeping = mode === "sleeping";
+  const petMood =
+    pendingAction
+      ? "approval"
+      : mode === "listening"
+        ? "listening"
+        : mode === "thinking"
+        ? "thinking"
+        : mode === "speaking"
+          ? "talking"
+          : mode === "offline"
+            ? "no"
+            : /^stopped/i.test(reply)
+              ? "stopped"
+              : "idle";
+  const petImage = {
+    approval: approvalPet,
+    denied: deniedPet,
+    idle: idlePet,
+    listening: listeningPet,
+    no: noPet,
+    stopped: stoppedPet,
+    talking: talkingPet,
+    thinking: thinkingPet,
+  }[petMood];
 
   useEffect(() => {
     window.jarvisDesktop.getStatus().then((next) => {
@@ -26,12 +74,16 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    void window.jarvisDesktop.setPromptDockOpen(!sleeping && promptOpen);
+  }, [promptOpen, sleeping]);
+
+  useEffect(() => {
     if (!status?.wakeEnabled || wakeRef.current) return;
     let cancelled = false;
     startWakeListener(
       () => {
-        setMode("listening");
-        setReply("I heard Jarvis.");
+        const handle = wakeRef.current;
+        if (handle) void captureVoiceTurn(handle);
       },
       setWakeScore,
     )
@@ -44,6 +96,7 @@ export default function App() {
       })
       .catch(() => {
         wakeRef.current = null;
+        setWakeIssue("Wake unavailable");
       });
 
     return () => {
@@ -53,137 +106,355 @@ export default function App() {
     };
   }, [status?.wakeEnabled]);
 
-  async function refreshStatus() {
-    const next = await window.jarvisDesktop.getStatus();
-    setStatus(next);
-    setMode(next.petMode);
-  }
-
   async function setPetMode(nextMode: PetMode) {
     const cfg = await window.jarvisDesktop.setPetMode(nextMode);
     setMode(cfg.petMode);
+    if (cfg.petMode === "sleeping") setPromptOpen(false);
   }
 
-  async function saveStatusPatch(patch: Parameters<typeof window.jarvisDesktop.saveConfig>[0]) {
-    const cfg = await window.jarvisDesktop.saveConfig(patch);
-    setStatus((current) =>
-      current
-        ? {
-            ...current,
-            startupEnabled: cfg.startupEnabled,
-            wakeEnabled: cfg.wakeEnabled,
-            voiceEnabled: cfg.voiceEnabled,
-            petMode: cfg.petMode,
-          }
-        : current,
-    );
-    setMode(cfg.petMode);
+  async function togglePrompt() {
+    void wakeRef.current?.ensureRunning().then((running) => {
+      if (running) setWakeIssue("");
+    });
+    if (sleeping) {
+      await setPetMode("idle");
+      setPromptOpen(true);
+      return;
+    }
+    setPromptOpen((open) => !open);
+  }
+
+  async function handleOrbPointerDown(event: ReactPointerEvent<HTMLButtonElement>) {
+    if (event.button !== 0) return;
+    event.currentTarget.setPointerCapture(event.pointerId);
+    const bounds = await window.jarvisDesktop.getWindowBounds();
+    dragRef.current = {
+      pointerId: event.pointerId,
+      startScreenX: event.screenX,
+      startScreenY: event.screenY,
+      bounds,
+      moved: false,
+    };
+  }
+
+  function handleOrbPointerMove(event: ReactPointerEvent<HTMLButtonElement>) {
+    const drag = dragRef.current;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    const deltaX = event.screenX - drag.startScreenX;
+    const deltaY = event.screenY - drag.startScreenY;
+    if (!drag.moved && Math.hypot(deltaX, deltaY) < 4) return;
+    drag.moved = true;
+    void window.jarvisDesktop.setWindowBounds({
+      ...drag.bounds,
+      x: drag.bounds.x + deltaX,
+      y: drag.bounds.y + deltaY,
+    });
+  }
+
+  function handleOrbPointerUp(event: ReactPointerEvent<HTMLButtonElement>) {
+    const drag = dragRef.current;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    dragRef.current = null;
+    if (!drag.moved) void togglePrompt();
   }
 
   async function submit() {
     const text = prompt.trim();
-    if (!text) return;
+    if (!text || mode === "thinking") return;
+    setTranscript(text);
     setMode("thinking");
     setReply("Sending...");
     try {
       const result = await window.jarvisDesktop.runTextTurn(text);
-      const spoken = result.reply || result.error || "No reply.";
-      setReply(spoken);
-      if (result.error) {
-        setMode("offline");
-        return;
-      }
-      if (status?.voiceEnabled !== false) {
-        setMode("speaking");
-        speak(spoken, () => setMode("idle"));
-      } else {
-        setMode("idle");
-      }
+      handleTurnResult(result, text);
     } catch (error) {
       setReply(error instanceof Error ? error.message : "JARVIS failed to send.");
       setMode("offline");
     }
   }
 
-  async function restartBridge() {
-    const next = await window.jarvisDesktop.restartBridge();
-    setStatus(next);
+  function summarizeActions(actions: unknown[] | undefined) {
+    if (!Array.isArray(actions)) return [];
+    return actions
+      .map((action) => {
+        const record = action as { name?: unknown; result?: unknown };
+        const name = String(record.name || "action");
+        const result = record.result as { local_action?: unknown; label?: unknown; error?: unknown } | undefined;
+        if (result?.local_action) return `${name}: waiting for approval (${String(result.label || result.local_action)})`;
+        if (result?.error) return `${name}: ${String(result.error)}`;
+        return name;
+      })
+      .slice(0, 4);
   }
 
-  const sleeping = mode === "sleeping";
+  function findLocalAction(actions: unknown[] | undefined): DesktopLocalActionIntent | null {
+    if (!Array.isArray(actions)) return null;
+    for (const action of actions) {
+      const result = (action as { result?: Partial<DesktopLocalActionIntent> }).result;
+      if (!result?.local_action) continue;
+      if (
+        result.local_action === "open" ||
+        result.local_action === "open_app" ||
+        result.local_action === "whatsapp_send" ||
+        result.local_action === "shutdown" ||
+        result.local_action === "run_shell"
+      ) {
+        return {
+          local_action: result.local_action,
+          target: result.target,
+          label: result.label || result.target || result.command || result.local_action,
+          fallback: result.fallback,
+          only: result.only,
+          command: result.command,
+          autoSend: result.autoSend,
+          delaySec: result.delaySec,
+          cancel: result.cancel,
+        };
+      }
+    }
+    return null;
+  }
+
+  function actionQuestion(intent: DesktopLocalActionIntent) {
+    if (intent.local_action === "run_shell") return `Run this command: ${intent.label}?`;
+    if (intent.local_action === "shutdown") return `${intent.label}?`;
+    if (intent.local_action === "whatsapp_send") return `Send ${intent.label}?`;
+    return `Open ${intent.label} on this computer?`;
+  }
+
+  function handleTurnResult(result: VoiceTurnResult, fallbackTranscript = "") {
+    if (result.transcript || fallbackTranscript) setTranscript(result.transcript || fallbackTranscript);
+    setActionRows(summarizeActions(result.actions));
+    const nextAction = findLocalAction(result.actions);
+    if (nextAction) {
+      setPendingAction(nextAction);
+      setPromptOpen(true);
+      setReply(actionQuestion(nextAction));
+      setMode("idle");
+      return;
+    }
+    const spoken = result.reply || result.error || "No reply.";
+    setReply(spoken);
+    if (result.error) {
+      setMode("offline");
+      return;
+    }
+    if (status?.voiceEnabled !== false) {
+      setMode("speaking");
+      speak(spoken, () => setMode("idle"));
+    } else {
+      setMode("idle");
+    }
+  }
+
+  function directMicStream() {
+    return navigator.mediaDevices.getUserMedia({
+      audio: {
+        echoCancellation: false,
+        noiseSuppression: false,
+        autoGainControl: false,
+      },
+    });
+  }
+
+  async function captureVoiceTurn(handle: WakeHandle | null) {
+    if (mode === "thinking" || mode === "speaking" || recorderRef.current) return;
+    let stream: MediaStream;
+    try {
+      stream = handle?.stream || (await directMicStream());
+    } catch (error) {
+      setWakeIssue("Mic blocked");
+      setPromptOpen(true);
+      setReply(error instanceof Error ? error.message : "Microphone access was blocked.");
+      setMode("offline");
+      return;
+    }
+    const shouldStopStream = !handle;
+    if (!stream || typeof MediaRecorder === "undefined") {
+      if (shouldStopStream) stream?.getTracks().forEach((track) => track.stop());
+      setWakeIssue("Mic recorder unavailable");
+      setPromptOpen(true);
+      setReply("I heard Jarvis, but voice capture is unavailable. Type your command.");
+      return;
+    }
+    handle?.pause();
+    setPromptOpen(true);
+    setMode("listening");
+    setTranscript("");
+    setReply("Listening...");
+    const chunks: Blob[] = [];
+    const preferredType = MediaRecorder.isTypeSupported("audio/webm;codecs=opus") ? "audio/webm;codecs=opus" : "audio/webm";
+    const recorder = new MediaRecorder(stream, { mimeType: preferredType });
+    recorderRef.current = recorder;
+    recorder.ondataavailable = (event) => {
+      if (event.data.size > 0) chunks.push(event.data);
+    };
+    recorder.onstop = async () => {
+      recorderRef.current = null;
+      if (!chunks.length) {
+        setReply("I didn't catch that.");
+        setMode("idle");
+        if (shouldStopStream) stream.getTracks().forEach((track) => track.stop());
+        handle?.resume();
+        return;
+      }
+      const audio = new Blob(chunks, { type: preferredType });
+      setMode("thinking");
+      setReply("Thinking...");
+      try {
+        const bytes = await audio.arrayBuffer();
+        const result = await window.jarvisDesktop.runAudioTurn({ bytes, type: audio.type });
+        handleTurnResult(result);
+      } catch (error) {
+        setReply(error instanceof Error ? error.message : "Voice turn failed.");
+        setMode("offline");
+      } finally {
+        if (shouldStopStream) stream.getTracks().forEach((track) => track.stop());
+        handle?.resume();
+      }
+    };
+    recorder.start();
+    window.setTimeout(() => {
+      if (recorderRef.current === recorder && recorder.state !== "inactive") recorder.stop();
+    }, 5200);
+  }
+
+  async function manualListen() {
+    setPromptOpen(true);
+    try {
+      const handle = wakeRef.current;
+      if (handle) {
+        const running = await handle.ensureRunning();
+        if (running) setWakeIssue("");
+        await captureVoiceTurn(handle);
+        return;
+      }
+      await captureVoiceTurn(null);
+    } catch (error) {
+      setWakeIssue("Listen failed");
+      setReply(error instanceof Error ? error.message : "Listening failed.");
+      setMode("offline");
+    }
+  }
+
+  async function continuePendingAction() {
+    if (!pendingAction || actionBusy) return;
+    setActionBusy(true);
+    setReply("Running...");
+    const result = await window.jarvisDesktop.runLocalAction(pendingAction);
+    setActionBusy(false);
+    setPendingAction(null);
+    setReply(result.message);
+    if (result.output) setActionRows([result.output]);
+    if (status?.voiceEnabled !== false) {
+      setMode("speaking");
+      speak(result.message, () => setMode("idle"));
+    } else {
+      setMode("idle");
+    }
+  }
+
+  function stopPendingAction() {
+    if (recorderRef.current && recorderRef.current.state !== "inactive") {
+      recorderRef.current.stop();
+      return;
+    }
+    setPendingAction(null);
+    setReply("Stopped.");
+    stopSpeaking();
+    setMode("idle");
+  }
 
   return (
-    <main className={`pet-shell mode-${mode}`}>
-      <button className="orb" onClick={() => setPetMode(sleeping ? "idle" : "sleeping")} aria-label="Toggle JARVIS sleep">
-        <span className="orb-core" />
-        <span className="orb-ring" />
+    <main className={`pet-shell mode-${mode} pet-${petMood} ${promptOpen ? "prompt-open" : "prompt-closed"}`}>
+      <button
+        className="pet-character"
+        onPointerDown={handleOrbPointerDown}
+        onPointerMove={handleOrbPointerMove}
+        onPointerUp={handleOrbPointerUp}
+        onPointerCancel={() => {
+          dragRef.current = null;
+        }}
+        onKeyDown={(event) => {
+          if (event.key === "Enter" || event.key === " ") {
+            event.preventDefault();
+            void togglePrompt();
+          }
+        }}
+        aria-label={promptOpen ? "Hide JARVIS prompt" : "Show JARVIS prompt"}
+        aria-expanded={promptOpen}
+      >
+        <img src={petImage} alt="" draggable={false} />
+        <span className="pet-shadow" />
       </button>
 
-      {!sleeping && (
-        <section className="panel" aria-label="JARVIS prompt panel">
-          <div className="header">
-            <div>
-              <strong>J.A.R.V.I.S.</strong>
-              <span>{status?.backendUrl || "Starting JARVIS..."}</span>
-              <span>Wake {wakeScore.toFixed(2)} · Bridge {status?.bridgeOnline ? "on" : "off"}</span>
-            </div>
-            <button onClick={() => setPetMode("sleeping")}>Sleep</button>
+      {!sleeping && promptOpen && (
+        <section className="prompt-dock" aria-label="JARVIS prompt">
+          <div className="prompt-row">
+            <textarea
+              value={prompt}
+              rows={1}
+              onChange={(event) => setPrompt(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter" && !event.shiftKey) {
+                  event.preventDefault();
+                  void submit();
+                }
+              }}
+              placeholder="Ask JARVIS..."
+            />
+            <button className="send-button" onClick={submit} disabled={!prompt.trim() || mode === "thinking"}>
+              Send
+            </button>
           </div>
 
-          <textarea
-            value={prompt}
-            onChange={(event) => setPrompt(event.target.value)}
-            onKeyDown={(event) => {
-              if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) void submit();
-            }}
-            placeholder="Type a prompt..."
-          />
-
-          <div className="actions">
-            <button onClick={submit} disabled={!prompt.trim() || mode === "thinking"}>
-              Send
+          <div className="pet-actions">
+            <button onClick={manualListen} disabled={mode === "thinking" || mode === "speaking" || !!recorderRef.current}>
+              Listen
             </button>
             <button
               onClick={() => {
-                stopSpeaking();
-                setMode("idle");
+                stopPendingAction();
               }}
             >
               Stop
             </button>
-            <button onClick={restartBridge}>Bridge</button>
-            <button onClick={() => window.jarvisDesktop.openFullJarvis()}>Open</button>
+            <button onClick={() => setPetMode("sleeping")}>Sleep</button>
           </div>
 
-          <div className="toggles">
-            <label>
-              <input
-                type="checkbox"
-                checked={status?.wakeEnabled ?? true}
-                onChange={(event) => saveStatusPatch({ wakeEnabled: event.target.checked })}
-              />
-              Wake
-            </label>
-            <label>
-              <input
-                type="checkbox"
-                checked={status?.voiceEnabled ?? true}
-                onChange={(event) => saveStatusPatch({ voiceEnabled: event.target.checked })}
-              />
-              Voice
-            </label>
-            <label>
-              <input
-                type="checkbox"
-                checked={status?.startupEnabled ?? true}
-                onChange={(event) => saveStatusPatch({ startupEnabled: event.target.checked })}
-              />
-              Startup
-            </label>
-            <button onClick={refreshStatus}>Refresh</button>
+          <div className="pet-status" title={wakeIssue || `Wake ${wakeScore.toFixed(2)} / Local ${status?.bridgeOnline ? "on" : "off"}`}>
+            <span className={`status-dot ${status?.bridgeOnline ? "online" : ""}`} />
+            <span>{mode === "thinking" ? "Thinking" : mode === "listening" ? "Listening" : wakeIssue || "Ready"}</span>
           </div>
 
+          {pendingAction && (
+            <div className="approval-card">
+              <p>{actionQuestion(pendingAction)}</p>
+              {pendingAction.command && <pre>{pendingAction.command}</pre>}
+              <div>
+                <button onClick={continuePendingAction} disabled={actionBusy}>
+                  {actionBusy ? "Running..." : "Continue"}
+                </button>
+                <button onClick={stopPendingAction} disabled={actionBusy}>
+                  Stop
+                </button>
+              </div>
+            </div>
+          )}
+
+          {transcript && (
+            <p className="transcript">
+              <strong>You</strong> {transcript}
+            </p>
+          )}
           {reply && <p className="reply">{reply}</p>}
+          {actionRows.length > 0 && (
+            <div className="action-list">
+              {actionRows.map((row, index) => (
+                <p key={`${row}-${index}`}>{row}</p>
+              ))}
+            </div>
+          )}
         </section>
       )}
     </main>

@@ -6,8 +6,10 @@ export type DesktopConfig = {
   wakeEnabled: boolean;
   voiceEnabled: boolean;
   petMode: PetMode;
-  bounds: { x: number; y: number; width: number; height: number } | null;
+  bounds: WindowBounds | null;
 };
+
+export type WindowBounds = { x: number; y: number; width: number; height: number };
 
 export type DesktopStatus = {
   backendUrl: string;
@@ -27,11 +29,40 @@ export type VoiceTurnResult = {
   error?: string;
 };
 
+export type AudioTurnInput = {
+  bytes: ArrayBuffer;
+  type: string;
+};
+
+export type DesktopLocalActionIntent = {
+  local_action: "open" | "open_app" | "whatsapp_send" | "shutdown" | "run_shell";
+  target?: string;
+  label: string;
+  fallback?: string;
+  only?: "app" | "folder";
+  command?: string;
+  autoSend?: boolean;
+  delaySec?: number;
+  cancel?: boolean;
+};
+
+export type DesktopActionResult = {
+  ok: boolean;
+  message: string;
+  output?: string;
+};
+
 export type JarvisDesktopApi = {
   getStatus(): Promise<DesktopStatus>;
   saveConfig(patch: Partial<DesktopConfig>): Promise<DesktopConfig>;
   runTextTurn(text: string): Promise<VoiceTurnResult>;
+  runAudioTurn(input: AudioTurnInput): Promise<VoiceTurnResult>;
+  runLocalAction(intent: DesktopLocalActionIntent): Promise<DesktopActionResult>;
   setPetMode(mode: PetMode): Promise<DesktopConfig>;
+  getWindowBounds(): Promise<WindowBounds>;
+  setWindowBounds(bounds: WindowBounds): Promise<void>;
+  setPromptDockOpen(open: boolean): Promise<void>;
+  getModelUrl(name: string): Promise<string>;
   restartBridge(): Promise<DesktopStatus>;
   openFullJarvis(): Promise<void>;
 };
