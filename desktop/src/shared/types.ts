@@ -1,5 +1,17 @@
 export type PetMode = "sleeping" | "idle" | "listening" | "thinking" | "speaking" | "offline";
 
+export type PetVisualState =
+  | "idle"
+  | "dragging"
+  | "listening"
+  | "thinking"
+  | "approval"
+  | "denied"
+  | "approved"
+  | "talking";
+
+export type PetImageOverrides = Partial<Record<PetVisualState, string>>;
+
 export type DesktopConfig = {
   backendUrl: string;
   startupEnabled: boolean;
