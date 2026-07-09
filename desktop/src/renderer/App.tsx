@@ -1,16 +1,34 @@
 import { useEffect, useRef, useState } from "react";
 import type { PointerEvent as ReactPointerEvent } from "react";
-import type { DesktopLocalActionIntent, DesktopStatus, PetMode, VoiceTurnResult, WindowBounds } from "../shared/types.js";
+import { selectPetVisualState } from "../shared/pet-visual-state.js";
+import type {
+  DesktopLocalActionIntent,
+  DesktopStatus,
+  PetImageOverrides,
+  PetMode,
+  PetVisualState,
+  VoiceTurnResult,
+  WindowBounds,
+} from "../shared/types.js";
 import approvalPet from "./assets/pet/approval.png";
 import deniedPet from "./assets/pet/denied.png";
 import idlePet from "./assets/pet/idle.png";
 import listeningPet from "./assets/pet/listening.png";
-import noPet from "./assets/pet/no.png";
-import stoppedPet from "./assets/pet/stopped.png";
 import talkingPet from "./assets/pet/talking.png";
 import thinkingPet from "./assets/pet/thinking.png";
 import { speak, stopSpeaking } from "./voice.js";
 import { startWakeListener, type WakeHandle } from "./wake.js";
+
+const bundledPetImages: Record<PetVisualState, string> = {
+  idle: idlePet,
+  dragging: idlePet,
+  listening: listeningPet,
+  thinking: thinkingPet,
+  approval: approvalPet,
+  denied: deniedPet,
+  approved: approvalPet,
+  talking: talkingPet,
+};
 
 export default function App() {
   const wakeRef = useRef<WakeHandle | null>(null);
@@ -33,37 +51,35 @@ export default function App() {
   const [pendingAction, setPendingAction] = useState<DesktopLocalActionIntent | null>(null);
   const [actionRows, setActionRows] = useState<string[]>([]);
   const [actionBusy, setActionBusy] = useState(false);
+  const [petImages, setPetImages] = useState<PetImageOverrides>({});
+  const [dragging, setDragging] = useState(false);
+  const [transientState, setTransientState] = useState<"approved" | "denied" | null>(null);
+  const transientTimerRef = useRef<number | null>(null);
   const sleeping = mode === "sleeping";
-  const petMood =
-    pendingAction
-      ? "approval"
-      : mode === "listening"
-        ? "listening"
-        : mode === "thinking"
-        ? "thinking"
-        : mode === "speaking"
-          ? "talking"
-          : mode === "offline"
-            ? "no"
-            : /^stopped/i.test(reply)
-              ? "stopped"
-              : "idle";
-  const petImage = {
-    approval: approvalPet,
-    denied: deniedPet,
-    idle: idlePet,
-    listening: listeningPet,
-    no: noPet,
-    stopped: stoppedPet,
-    talking: talkingPet,
-    thinking: thinkingPet,
-  }[petMood];
+  const petVisualState = selectPetVisualState({
+    dragging,
+    transient: transientState,
+    hasPendingAction: Boolean(pendingAction),
+    mode,
+  });
+  const petImage = petImages[petVisualState] || bundledPetImages[petVisualState];
 
   useEffect(() => {
     window.jarvisDesktop.getStatus().then((next) => {
       setStatus(next);
       setMode(next.petMode);
     });
+  }, []);
+
+  useEffect(() => {
+    void window.jarvisDesktop.getPetImages().then(setPetImages);
+    return window.jarvisDesktop.onPetImagesChanged(setPetImages);
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (transientTimerRef.current) window.clearTimeout(transientTimerRef.current);
+    };
   }, []);
 
   useEffect(() => {
@@ -126,6 +142,7 @@ export default function App() {
 
   async function handleOrbPointerDown(event: ReactPointerEvent<HTMLButtonElement>) {
     if (event.button !== 0) return;
+    setDragging(false);
     event.currentTarget.setPointerCapture(event.pointerId);
     const bounds = await window.jarvisDesktop.getWindowBounds();
     dragRef.current = {
@@ -142,8 +159,11 @@ export default function App() {
     if (!drag || drag.pointerId !== event.pointerId) return;
     const deltaX = event.screenX - drag.startScreenX;
     const deltaY = event.screenY - drag.startScreenY;
-    if (!drag.moved && Math.hypot(deltaX, deltaY) < 4) return;
-    drag.moved = true;
+    if (!drag.moved) {
+      if (Math.hypot(deltaX, deltaY) < 4) return;
+      drag.moved = true;
+      setDragging(true);
+    }
     void window.jarvisDesktop.setWindowBounds({
       ...drag.bounds,
       x: drag.bounds.x + deltaX,
@@ -155,6 +175,7 @@ export default function App() {
     const drag = dragRef.current;
     if (!drag || drag.pointerId !== event.pointerId) return;
     dragRef.current = null;
+    setDragging(false);
     if (!drag.moved) void togglePrompt();
   }
 
@@ -340,10 +361,12 @@ export default function App() {
   async function continuePendingAction() {
     if (!pendingAction || actionBusy) return;
     setActionBusy(true);
+    setTransientState("approved");
     setReply("Running...");
     const result = await window.jarvisDesktop.runLocalAction(pendingAction);
     setActionBusy(false);
     setPendingAction(null);
+    setTransientState(null);
     setReply(result.message);
     if (result.output) setActionRows([result.output]);
     if (status?.voiceEnabled !== false) {
@@ -359,14 +382,20 @@ export default function App() {
       recorderRef.current.stop();
       return;
     }
+    const deniedApproval = Boolean(pendingAction);
     setPendingAction(null);
     setReply("Stopped.");
     stopSpeaking();
     setMode("idle");
+    if (deniedApproval) {
+      setTransientState("denied");
+      if (transientTimerRef.current) window.clearTimeout(transientTimerRef.current);
+      transientTimerRef.current = window.setTimeout(() => setTransientState(null), 1400);
+    }
   }
 
   return (
-    <main className={`pet-shell mode-${mode} pet-${petMood} ${promptOpen ? "prompt-open" : "prompt-closed"}`}>
+    <main className={`pet-shell mode-${mode} pet-${petVisualState} ${promptOpen ? "prompt-open" : "prompt-closed"}`}>
       <button
         className="pet-character"
         onPointerDown={handleOrbPointerDown}
@@ -374,6 +403,7 @@ export default function App() {
         onPointerUp={handleOrbPointerUp}
         onPointerCancel={() => {
           dragRef.current = null;
+          setDragging(false);
         }}
         onKeyDown={(event) => {
           if (event.key === "Enter" || event.key === " ") {
@@ -384,7 +414,16 @@ export default function App() {
         aria-label={promptOpen ? "Hide JARVIS prompt" : "Show JARVIS prompt"}
         aria-expanded={promptOpen}
       >
-        <img src={petImage} alt="" draggable={false} />
+        <img
+          key={`${petVisualState}:${petImage}`}
+          src={petImage}
+          alt=""
+          draggable={false}
+          onError={(event) => {
+            const fallback = bundledPetImages[petVisualState];
+            if (event.currentTarget.src !== fallback) event.currentTarget.src = fallback;
+          }}
+        />
         <span className="pet-shadow" />
       </button>
 

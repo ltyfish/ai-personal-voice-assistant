@@ -103,6 +103,10 @@ input {
   animation: thinking-breathe 1.05s ease-in-out infinite;
 }
 
+.pet-dragging .pet-character img {
+  animation: dragging-tilt 0.5s ease-in-out infinite alternate;
+}
+
 .pet-thinking .pet-character {
   animation: pet-idle-float 2.8s ease-in-out infinite;
 }
@@ -113,6 +117,10 @@ input {
 
 .pet-talking .pet-character img {
   animation: talking-pulse 0.62s cubic-bezier(0.16, 1, 0.3, 1) infinite;
+}
+
+.pet-approved .pet-character img {
+  animation: approved-pop 0.8s ease-in-out infinite alternate;
 }
 
 .pet-denied .pet-character img,
@@ -328,6 +336,16 @@ button:disabled {
   }
 }
 
+@keyframes dragging-tilt {
+  from {
+    transform: rotate(-2deg) scale(0.99);
+  }
+
+  to {
+    transform: rotate(2deg) scale(1.01);
+  }
+}
+
 @keyframes pet-shadow-breathe {
   0%,
   100% {
@@ -371,6 +389,16 @@ button:disabled {
 
   48% {
     transform: translate3d(5px, -3px, 0) rotate(1.4deg) scale(1.025);
+  }
+}
+
+@keyframes approved-pop {
+  from {
+    transform: translateY(0) scale(1);
+  }
+
+  to {
+    transform: translateY(-5px) scale(1.025);
   }
 }
 

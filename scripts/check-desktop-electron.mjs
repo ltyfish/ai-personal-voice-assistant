@@ -126,11 +126,17 @@ assert(/manualListen/.test(app) && /directMicStream/.test(app), "renderer must p
 assert(/>\s*Listen\s*</.test(app), "renderer must expose a Listen button for manual voice capture");
 assert(/pendingAction/.test(app), "renderer must show pending local action approvals");
 assert(/runLocalAction/.test(app), "renderer must run confirmed local actions through IPC");
+assert(/selectPetVisualState/.test(app), "renderer must select explicit pet visual states");
+assert(/onPetImagesChanged/.test(app), "renderer must hot reload image overrides");
+assert(/setDragging\(true\)/.test(app), "renderer must show a dragging image after movement begins");
+assert(/setTransientState\("approved"\)/.test(app), "renderer must show approved while an action runs");
+assert(/setTransientState\("denied"\)/.test(app), "renderer must show denied after rejecting an action");
+assert(/onError=/.test(app), "renderer must fall back when an override image fails");
 assert(/event\.key === "Enter" && !event\.shiftKey/.test(app), "plain Enter must submit desktop prompts");
 assert(/event\.preventDefault\(\)/.test(app), "Enter submit must prevent textarea newline insertion");
 assert(!/Starting local JARVIS/.test(app), "renderer must not claim cloud backend is local startup");
 assert(/idlePet/.test(app) && /thinkingPet/.test(app) && /approvalPet/.test(app), "renderer must use character pet image states");
-assert(/listeningPet/.test(app) && /stoppedPet/.test(app), "renderer must use separate listening and stopped character states");
+assert(/listeningPet/.test(app) && /deniedPet/.test(app) && /talkingPet/.test(app), "renderer must bundle activity and approval-result images");
 assert(/className="pet-character"/.test(app), "renderer must render the character pet instead of an orb");
 assert(/@keyframes pet-idle-float/.test(read("desktop/src/renderer/app.css")), "idle pet must have subtle float animation");
 assert(/@keyframes thinking-scoot/.test(read("desktop/src/renderer/app.css")), "thinking pet must visibly move");
