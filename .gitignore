@@ -4,6 +4,7 @@ node_modules
 .env
 .env.local
 .env*.local
+/jarvis-pet.env
 *.log
 .DS_Store
 .vercel

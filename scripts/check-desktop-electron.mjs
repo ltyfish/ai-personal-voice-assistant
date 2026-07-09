@@ -49,6 +49,7 @@ const app = read("desktop/src/renderer/App.tsx");
 const wake = read("desktop/src/renderer/wake.ts");
 const voice = read("desktop/src/renderer/voice.ts");
 const localUpdater = read("scripts/update-desktop-local.ps1");
+const petEnvExample = read("jarvis-pet.env.example");
 
 assert(/contextIsolation:\s*true/.test(main), "BrowserWindow must enable contextIsolation");
 assert(/nodeIntegration:\s*false/.test(main), "BrowserWindow must disable nodeIntegration");
@@ -150,5 +151,20 @@ assert(!/\/D=\$InstallDir/.test(localUpdater), "local updater must not rely on N
 assert(/win-unpacked/.test(localUpdater) && /Copy-Item/.test(localUpdater), "local updater must copy the unpacked build into the launch directory");
 assert(/CreateShortcut/.test(localUpdater), "local updater must refresh the Start Menu shortcut");
 assert(/Start-Process -FilePath \$exePath/.test(localUpdater), "local updater must relaunch the updated desktop app");
+for (const key of [
+  "IDLE",
+  "DRAGGING",
+  "LISTENING",
+  "THINKING",
+  "APPROVAL",
+  "DENIED",
+  "APPROVED",
+  "TALKING",
+]) {
+  assert(petEnvExample.includes(`JARVIS_PET_${key}_IMAGE=`), `pet env example must include ${key}`);
+}
+assert(/jarvis-pet\.env/.test(gitignore), "user pet image environment file must be ignored");
+assert(/jarvis-pet\.env\.example/.test(localUpdater), "updater must seed pet image configuration");
+assert(/Test-Path \$installedPetEnv/.test(localUpdater), "updater must preserve existing pet image configuration");
 
 console.log("Desktop Electron check passed.");

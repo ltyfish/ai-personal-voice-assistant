@@ -8,6 +8,8 @@ $repoRoot = Split-Path -Parent $PSScriptRoot
 $desktopRelease = Join-Path $repoRoot "desktop\release"
 $unpackedDir = Join-Path $desktopRelease "win-unpacked"
 $exePath = Join-Path $InstallDir "JARVIS Desktop.exe"
+$installedPetEnv = Join-Path $InstallDir "jarvis-pet.env"
+$petEnvExample = Join-Path $repoRoot "jarvis-pet.env.example"
 $startMenuShortcut = Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs\JARVIS Desktop.lnk"
 
 Set-Location $repoRoot
@@ -40,6 +42,11 @@ if (-not (Test-Path $unpackedDir)) {
 
 Write-Host "Copying unpacked build to $InstallDir..."
 Copy-Item -Path (Join-Path $unpackedDir "*") -Destination $InstallDir -Recurse -Force
+
+if (-not (Test-Path $installedPetEnv)) {
+  Write-Host "Creating editable pet image configuration..."
+  Copy-Item -LiteralPath $petEnvExample -Destination $installedPetEnv
+}
 
 if (-not (Test-Path $exePath)) {
   throw "Updated executable was not found at $exePath."
