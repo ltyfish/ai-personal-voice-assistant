@@ -1,9 +1,11 @@
 import { contextBridge, ipcRenderer } from "electron";
+import type { IpcRendererEvent } from "electron";
 import type {
   AudioTurnInput,
   DesktopConfig,
   DesktopLocalActionIntent,
   JarvisDesktopApi,
+  PetImageOverrides,
   PetMode,
   VoiceTurnResult,
   WindowBounds,
@@ -11,6 +13,12 @@ import type {
 
 const api: JarvisDesktopApi = {
   getStatus: () => ipcRenderer.invoke("desktop:getStatus"),
+  getPetImages: () => ipcRenderer.invoke("desktop:getPetImages"),
+  onPetImagesChanged: (listener) => {
+    const handler = (_event: IpcRendererEvent, images: PetImageOverrides) => listener(images);
+    ipcRenderer.on("desktop:petImagesChanged", handler);
+    return () => ipcRenderer.removeListener("desktop:petImagesChanged", handler);
+  },
   saveConfig: (patch: Partial<DesktopConfig>) => ipcRenderer.invoke("desktop:saveConfig", patch),
   runTextTurn: (text: string): Promise<VoiceTurnResult> => ipcRenderer.invoke("desktop:runTextTurn", text),
   runAudioTurn: (input: AudioTurnInput): Promise<VoiceTurnResult> => ipcRenderer.invoke("desktop:runAudioTurn", input),

@@ -40,6 +40,7 @@ assert(/desktop\/release\//.test(gitignore), ".gitignore must ignore desktop/rel
 const main = read("desktop/src/main.ts");
 const preload = read("desktop/src/preload.cts");
 const config = read("desktop/src/main/config.ts");
+const petImages = read("desktop/src/main/pet-images.ts");
 const types = read("desktop/src/shared/types.ts");
 const runtime = read("desktop/src/main/runtime.ts");
 const bridge = read("desktop/src/main/bridge.ts");
@@ -92,6 +93,13 @@ assert(/desktop:restartBridge/.test(main), "main process must expose restart bri
 assert(/desktop:getWindowBounds/.test(main), "main process must expose window bounds for manual orb dragging");
 assert(/desktop:setWindowBounds/.test(main), "main process must expose window movement for manual orb dragging");
 assert(/desktop:setPromptDockOpen/.test(main), "main process must resize the transparent pet when the prompt dock opens");
+assert(/desktop:getPetImages/.test(main), "main process must expose runtime pet images");
+assert(/desktop:petImagesChanged/.test(main), "main process must publish pet image changes");
+assert(/watchFile/.test(main), "main process must watch runtime pet image configuration");
+assert(/getPetImages/.test(preload), "preload must expose initial runtime pet images");
+assert(/onPetImagesChanged/.test(preload), "preload must expose hot pet image updates");
+assert(/JARVIS_PET_DRAGGING_IMAGE/.test(petImages), "pet image loader must support dragging");
+assert(/JARVIS_PET_APPROVED_IMAGE/.test(petImages), "pet image loader must support approved actions");
 assert(/speechSynthesis/.test(voice), "renderer must speak replies with speechSynthesis");
 assert(/WakeWordEngine/.test(wake), "renderer must reuse existing WakeWordEngine");
 assert(/setWindowForMode/.test(main), "main process must resize the pet when sleeping");

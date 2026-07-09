@@ -66,6 +66,8 @@ export type DesktopActionResult = {
 
 export type JarvisDesktopApi = {
   getStatus(): Promise<DesktopStatus>;
+  getPetImages(): Promise<PetImageOverrides>;
+  onPetImagesChanged(listener: (images: PetImageOverrides) => void): () => void;
   saveConfig(patch: Partial<DesktopConfig>): Promise<DesktopConfig>;
   runTextTurn(text: string): Promise<VoiceTurnResult>;
   runAudioTurn(input: AudioTurnInput): Promise<VoiceTurnResult>;

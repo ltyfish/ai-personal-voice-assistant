@@ -1,6 +1,6 @@
 import { BrowserWindow, Menu, Tray, app, ipcMain, nativeImage, session, shell } from "electron";
 import type { Rectangle } from "electron";
-import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, unwatchFile, watchFile } from "node:fs";
 import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { fileURLToPath } from "node:url";
@@ -15,6 +15,7 @@ import type {
 } from "./shared/types.js";
 import { bridgeOnline, restartBridge, startBridge, stopBridge } from "./main/bridge.js";
 import { CLOUD_BACKEND_URL, loadConfig, saveConfig } from "./main/config.js";
+import { loadPetImages } from "./main/pet-images.js";
 import { RUNTIME_URL, startRuntime, stopRuntime, waitForRuntime } from "./main/runtime.js";
 
 let petWindow: BrowserWindow | null = null;
@@ -23,6 +24,7 @@ let runtimeOnline = false;
 let bridgeIsOnline = false;
 let isQuitting = false;
 let savingProgrammaticBounds = false;
+let petImageWatchTimer: NodeJS.Timeout | undefined;
 const mainDir = dirname(fileURLToPath(import.meta.url));
 
 app.disableHardwareAcceleration();
@@ -47,6 +49,27 @@ function logDesktop(message: string, error?: unknown) {
 function rendererUrl() {
   if (!app.isPackaged) return "http://127.0.0.1:5188";
   return `file://${join(mainDir, "renderer/index.html")}`;
+}
+
+function petImagesEnvPath() {
+  return app.isPackaged
+    ? join(dirname(process.execPath), "jarvis-pet.env")
+    : join(mainDir, "../../jarvis-pet.env");
+}
+
+function currentPetImages() {
+  return loadPetImages(petImagesEnvPath());
+}
+
+function startPetImageWatcher() {
+  const path = petImagesEnvPath();
+  watchFile(path, { interval: 500 }, () => {
+    clearTimeout(petImageWatchTimer);
+    petImageWatchTimer = setTimeout(() => {
+      if (!petWindow || petWindow.isDestroyed()) return;
+      petWindow.webContents.send("desktop:petImagesChanged", currentPetImages());
+    }, 150);
+  });
 }
 
 function status(): DesktopStatus {
@@ -391,6 +414,7 @@ ipcMain.handle("desktop:getStatus", async () => {
   bridgeIsOnline = await bridgeOnline();
   return status();
 });
+ipcMain.handle("desktop:getPetImages", () => currentPetImages());
 ipcMain.handle("desktop:saveConfig", (_event, patch: Partial<DesktopConfig>) => {
   const next = saveConfig(patch);
   if (typeof patch.startupEnabled === "boolean") applyStartup(patch.startupEnabled);
@@ -481,6 +505,7 @@ app.whenReady().then(async () => {
   const cfg = loadConfig();
   applyStartup(cfg.startupEnabled);
   createPetWindow();
+  startPetImageWatcher();
   createTray();
   if (shouldStartLocalRuntime(cfg.backendUrl)) startRuntime();
   startBridge();
@@ -507,6 +532,8 @@ app.on("second-instance", () => {
 
 app.on("before-quit", () => {
   isQuitting = true;
+  clearTimeout(petImageWatchTimer);
+  unwatchFile(petImagesEnvPath());
   stopBridge();
   stopRuntime();
 });
