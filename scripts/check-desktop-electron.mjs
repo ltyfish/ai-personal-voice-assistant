@@ -168,6 +168,10 @@ for (const key of [
 ]) {
   assert(petEnvExample.includes(`JARVIS_PET_${key}_IMAGE=`), `pet env example must include ${key}`);
 }
+assert(
+  /JARVIS_PET_IDLE_IMAGE=.*,.*/.test(petEnvExample),
+  "pet env example must demonstrate comma-separated image pools",
+);
 assert(/jarvis-pet\.env/.test(gitignore), "user pet image environment file must be ignored");
 assert(/jarvis-pet\.env\.example/.test(localUpdater), "updater must seed pet image configuration");
 assert(/Test-Path \$installedPetEnv/.test(localUpdater), "updater must preserve existing pet image configuration");
