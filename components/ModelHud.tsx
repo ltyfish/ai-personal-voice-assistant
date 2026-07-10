@@ -73,9 +73,7 @@ function ago(at: number, now: number): string {
 
 export default function ModelHud() {
   const [state, setState] = useState<HudState>(getHudState());
-  // Start as a slim status rail. The full diagnostic feed is one click away,
-  // but it should not cover the assistant's primary command surface on load.
-  const [collapsed, setCollapsed] = useState(true);
+  const [collapsed, setCollapsed] = useState(false);
   const [now, setNow] = useState(() => Date.now());
   const [size, setSize] = useState<{ w: number; h: number }>(() => loadHudSize());
   const padRef = useRef<HTMLDivElement | null>(null);

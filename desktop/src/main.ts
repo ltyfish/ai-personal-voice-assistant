@@ -28,6 +28,8 @@ let savingProgrammaticBounds = false;
 let petImageWatchTimer: NodeJS.Timeout | undefined;
 const mainDir = dirname(fileURLToPath(import.meta.url));
 
+app.disableHardwareAcceleration();
+
 const gotSingleInstanceLock = app.requestSingleInstanceLock();
 
 if (!gotSingleInstanceLock) {

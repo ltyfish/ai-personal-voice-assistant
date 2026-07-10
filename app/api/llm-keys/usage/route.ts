@@ -122,8 +122,7 @@ export async function GET() {
 
   const modelRows = [...models.values()]
     .map((m) => {
-      const cd = modelCooldowns[normalizeModelCooldownCatalogId(m.platform, m.model)]
-        ?? modelCooldowns[normalizeModelCooldownCatalogId(m.model)];
+      const cd = modelCooldowns[normalizeModelCooldownCatalogId(m.model)];
       return {
         ...m,
         rank: modelRank(m.model),
@@ -163,8 +162,7 @@ export async function GET() {
     const k = mkKey(platform, model);
     if (lbSeen.has(k)) return;
     lbSeen.add(k);
-    const cd = modelCooldowns[normalizeModelCooldownCatalogId(platform, model)]
-      ?? modelCooldowns[normalizeModelCooldownCatalogId(model)];
+    const cd = modelCooldowns[normalizeModelCooldownCatalogId(model)];
     const tok = tokensByModel.get(k) ?? { today: 0, total: 0 };
     leaderboard.push({
       platform, model, source,
