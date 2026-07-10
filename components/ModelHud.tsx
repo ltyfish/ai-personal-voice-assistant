@@ -73,7 +73,7 @@ function ago(at: number, now: number): string {
 
 export default function ModelHud() {
   const [state, setState] = useState<HudState>(getHudState());
-  const [collapsed, setCollapsed] = useState(true);
+  const [collapsed, setCollapsed] = useState(false);
   const [now, setNow] = useState(() => Date.now());
   const [size, setSize] = useState<{ w: number; h: number }>(() => loadHudSize());
   const padRef = useRef<HTMLDivElement | null>(null);

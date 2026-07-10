@@ -11,9 +11,7 @@ import BootSequence from "@/components/jarvis/BootSequence";
 import { SortableList, type DragHandle } from "@/components/dnd/SortableList";
 import { NestedSortable } from "@/components/dnd/NestedSortable";
 import DesktopPetDownload from "@/components/DesktopPetDownload";
-import ExperienceLayer from "@/components/experience/ExperienceLayer";
 import "./mail/mail.css";
-import "./experience.css";
 
 type Task = {
   id: string;
@@ -138,7 +136,6 @@ export default function Home() {
     <>
       {/* JARVIS power-on overlay — once per session, fades to reveal the app. */}
       <BootSequence />
-      <ExperienceLayer />
       <DesktopPetDownload />
       {/* Always mounted (not tied to the Calendar tab) so reminders fire no
           matter which tab is open. */}
