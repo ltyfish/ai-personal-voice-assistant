@@ -3,12 +3,16 @@ const INSTALLER_URL =
 
 export default function DesktopPetDownload() {
   return (
-    <aside className="desktop-pet-download">
-      <div>
+    <aside className="desktop-pet-download" data-cursor="PET">
+      <div className="pet-portrait" aria-hidden>
+        <img src="/media/sawako-pet.png" alt="" />
+        <span className="pet-signal" />
+      </div>
+      <div className="pet-copy">
         <strong>JARVIS on your desktop</strong>
         <span>Install the floating Windows pet. It stays connected to this cloud JARVIS.</span>
       </div>
-      <a href={INSTALLER_URL}>Download JARVIS Pet for Windows</a>
+      <a href={INSTALLER_URL} data-cursor="INSTALL">Download JARVIS Pet for Windows</a>
     </aside>
   );
 }

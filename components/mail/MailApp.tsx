@@ -13,6 +13,7 @@ import StatusIndicator from "@/components/jarvis/StatusIndicator";
 import ToastHost from "@/components/Toast";
 import { notify, confirmDialog } from "@/lib/toast";
 import { useLocalPresence } from "@/lib/local-presence";
+import gsap from "gsap";
 
 type View = "feed" | "digest" | "urgency" | "settings";
 type Tab = "assistant" | "tasks" | "calendar" | "notes" | "projects" | "abilities" | "local" | "freellmapi" | "github" | View;
@@ -64,6 +65,7 @@ export default function MailApp({
   const [ready, setReady] = useState(false);
   const [moreOpen, setMoreOpen] = useState(false);
   const moreRef = useRef<HTMLDivElement | null>(null);
+  const mainRef = useRef<HTMLElement | null>(null);
   // On phones the inline tab pill can't fit; below this width we hide it and the
   // hamburger holds the FULL tab list instead (a standard mobile nav).
   const [isNarrow, setIsNarrow] = useState(false);
@@ -157,11 +159,22 @@ export default function MailApp({
   const menuTabs = isNarrow ? TABS : moreTabs;
   const moreActive = menuTabs.some((t) => t.id === tab);
 
+  useEffect(() => {
+    const activeView = mainRef.current?.querySelector(".view.active");
+    if (!activeView || window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+    gsap.fromTo(
+      activeView,
+      { autoAlpha: 0, y: 18, clipPath: "inset(0 0 7% 0)" },
+      { autoAlpha: 1, y: 0, clipPath: "inset(0 0 0% 0)", duration: .58, ease: "expo.out", clearProps: "transform,clipPath,opacity,visibility" }
+    );
+  }, [tab]);
+
   if (!ready) return <div className="mailmind" data-theme={theme} />;
 
   return (
     <div className="mailmind" data-theme={theme} data-tab={tab}>
-      <nav className="navbar">
+      <header className="hud-header">
+      <nav className="navbar" aria-label="Primary workspace navigation">
         <button
           type="button"
           className={`nav-brand${tab === "assistant" ? " active" : ""}`}
@@ -169,8 +182,12 @@ export default function MailApp({
           title="Go to JARVIS"
         >
           <span className="nav-brand-dot" />
-          J.A.R.V.I.S.
+          <span>J.A.R.V.I.S.</span>
         </button>
+        <div className="hud-context" aria-live="polite">
+          <span>Active workspace</span>
+          <strong>{tab === "freellmapi" ? "LLM Keys" : tab.charAt(0).toUpperCase() + tab.slice(1)}</strong>
+        </div>
         <div className="nav-links">
           {primaryTabs.map((t) => (
             <a
@@ -227,10 +244,17 @@ export default function MailApp({
           )}
         </div>
       )}
+      </header>
+
+      <aside className="chapter-rail" aria-label="Workspace position">
+        <span className="chapter-index">{String(tab === "assistant" ? 1 : TABS.findIndex((item) => item.id === tab) + 2).padStart(2, "0")}</span>
+        <span className="chapter-line" aria-hidden />
+        <span className="chapter-total">{String(TABS.length + 1).padStart(2, "0")}</span>
+      </aside>
 
       <div className="layout">
         {isMail && <UrgentPanel api={api} />}
-        <main className="main-content">
+        <main className="main-content" ref={mainRef}>
           {assistant && (
             <div className={`view${tab === "assistant" ? " active" : ""}`}>
               {assistant}
