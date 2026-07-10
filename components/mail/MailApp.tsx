@@ -18,7 +18,9 @@ type View = "feed" | "digest" | "urgency" | "settings";
 type Tab = "assistant" | "tasks" | "calendar" | "notes" | "projects" | "abilities" | "local" | "freellmapi" | "github" | View;
 
 const URGENCY_LABELS = ["", "Minimal", "Low", "Medium", "High", "Critical"];
-const MORE_TAB_IDS = new Set<Tab>(["tasks", "notes", "projects", "feed", "digest", "urgency"]);
+const MORE_TAB_IDS = new Set<Tab>([
+  "abilities", "local", "freellmapi", "github", "feed", "digest", "urgency", "settings",
+]);
 
 // ───────────────────────── api hook ─────────────────────────
 function useApi(secret: string) {
@@ -138,18 +140,18 @@ export default function MailApp({
   const isMail = !isOpenTab(tab);
 
   const TABS: { id: Tab; label: string }[] = [
-    { id: "freellmapi", label: "LLM Keys" },
+    ...(tasks ? [{ id: "tasks" as Tab, label: "Tasks" }] : []),
+    ...(calendar ? [{ id: "calendar" as Tab, label: "Calendar" }] : []),
+    ...(projects ? [{ id: "projects" as Tab, label: "Projects" }] : []),
+    ...(notes ? [{ id: "notes" as Tab, label: "Notes" }] : []),
+    { id: "abilities", label: "Abilities" },
+    { id: "freellmapi", label: "Models" },
     ...(localOnline ? [{ id: "local" as Tab, label: "Local" }] : []),
     { id: "github", label: "GitHub" },
-    ...(calendar ? [{ id: "calendar" as Tab, label: "Calendar" }] : []),
-    { id: "abilities", label: "Abilities" },
-    { id: "settings", label: "Settings" },
-    ...(tasks ? [{ id: "tasks" as Tab, label: "Tasks" }] : []),
-    ...(notes ? [{ id: "notes" as Tab, label: "Notes" }] : []),
-    ...(projects ? [{ id: "projects" as Tab, label: "Projects" }] : []),
     { id: "feed", label: "Inbox" },
     { id: "digest", label: "Digest" },
     { id: "urgency", label: "Urgency" },
+    { id: "settings", label: "Settings" },
   ];
   const primaryTabs = TABS.filter((t) => !MORE_TAB_IDS.has(t.id));
   const moreTabs = TABS.filter((t) => MORE_TAB_IDS.has(t.id));
@@ -169,7 +171,10 @@ export default function MailApp({
           title="Go to JARVIS"
         >
           <span className="nav-brand-dot" />
-          J.A.R.V.I.S.
+          <span className="nav-brand-copy">
+            <strong>JARVIS</strong>
+            <small>Personal operating system</small>
+          </span>
         </button>
         <div className="nav-links">
           {primaryTabs.map((t) => (

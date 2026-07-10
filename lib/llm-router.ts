@@ -226,7 +226,10 @@ function normalizeModelCooldownId(model: string) {
 }
 
 function modelCooldownKey(_platform: string, model: string) {
-  return normalizeModelCooldownId(model);
+  // A model can be unavailable on one provider while the exact same model is
+  // healthy on another. Keep cooldowns provider-scoped so multi-provider
+  // redundancy actually works instead of globally sidelining the model id.
+  return `${_platform}/${normalizeModelCooldownId(model)}`;
 }
 
 async function getModelCooldown(
@@ -303,8 +306,11 @@ export async function getActiveModelCooldowns(): Promise<
       const v = r.value as { until?: string; detail?: string } | undefined;
       const untilMs = v?.until ? new Date(v.until).getTime() : 0;
       if (!untilMs || untilMs <= now) continue;
-      // Normalize the stored key too (legacy keys were "platform/model").
-      out[normalizeModelCooldownId(r.key)] = { until: v!.until!, detail: v?.detail || "model cooldown" };
+      const slash = r.key.indexOf("/");
+      const normalizedKey = slash > 0
+        ? `${r.key.slice(0, slash)}/${normalizeModelCooldownId(r.key.slice(slash + 1))}`
+        : normalizeModelCooldownId(r.key);
+      out[normalizedKey] = { until: v!.until!, detail: v?.detail || "model cooldown" };
     }
     return out;
   } catch {
@@ -314,8 +320,10 @@ export async function getActiveModelCooldowns(): Promise<
 
 // Exposed so the dashboard can map a catalog model id to the same normalized id
 // the cooldown store uses.
-export function normalizeModelCooldownCatalogId(model: string): string {
-  return normalizeModelCooldownId(model);
+export function normalizeModelCooldownCatalogId(platform: string, model?: string): string {
+  // Backward-compatible one-argument form reads old global cooldown rows.
+  if (model === undefined) return normalizeModelCooldownId(platform);
+  return `${platform}/${normalizeModelCooldownId(model)}`;
 }
 
 async function filterAvailableModels(candidates: string[]): Promise<string[]> {
@@ -331,7 +339,8 @@ async function filterAvailableModels(candidates: string[]): Promise<string[]> {
   for (const candidate of candidates) {
     const parsed = splitModel(candidate);
     if (!parsed) continue;
-    if (cooled[normalizeModelCooldownId(parsed.upstreamModel)]) continue;
+    const scoped = `${parsed.platform}/${normalizeModelCooldownId(parsed.upstreamModel)}`;
+    if (cooled[scoped] || cooled[normalizeModelCooldownId(parsed.upstreamModel)]) continue;
     out.push(candidate);
   }
   return out;
@@ -537,6 +546,74 @@ async function enabledPlatforms(): Promise<Set<string>> {
   return new Set(rows.map((r) => r.platform));
 }
 
+// Provider catalogs change faster than deployments: free models are retired,
+// renamed, or removed from individual accounts. Probe the user's own enabled
+// provider keys and cache the result briefly. A failed probe is represented by
+// null and never removes a stored candidate; a successful probe is authoritative
+// for that provider and prevents us spending a full completion timeout on a
+// model the provider no longer exposes.
+const LIVE_MODELS_TTL_MS = 5 * 60_000;
+const LIVE_MODELS_TIMEOUT_MS = 1_800;
+const liveModelCache = new Map<string, { at: number; models: Set<string> | null }>();
+const liveModelInflight = new Map<string, Promise<Set<string> | null>>();
+
+async function liveProviderModels(platform: string): Promise<Set<string> | null> {
+  const cached = liveModelCache.get(platform);
+  if (cached && Date.now() - cached.at < LIVE_MODELS_TTL_MS) return cached.models;
+  const pending = liveModelInflight.get(platform);
+  if (pending) return pending;
+
+  const request = (async () => {
+    try {
+      const key = (await candidateKeys(platform))[0];
+      const cfg = PROVIDERS[platform];
+      if (!key || !cfg) return null;
+      const base = (key.baseUrl || cfg.baseUrl).replace(/\/$/, "");
+      if (!base) return null;
+      const res = await fetch(`${base}/models`, {
+        headers: buildHeaders(cfg, key),
+        signal: AbortSignal.timeout(LIVE_MODELS_TIMEOUT_MS),
+      });
+      if (!res.ok) return null;
+      const body = await res.json().catch(() => null) as any;
+      const rows = Array.isArray(body?.data) ? body.data : Array.isArray(body?.models) ? body.models : [];
+      const models = new Set<string>();
+      for (const row of rows) {
+        const id = String(typeof row === "string" ? row : row?.id ?? row?.name ?? "").trim();
+        if (id) {
+          models.add(id);
+          if (id.startsWith("models/")) models.add(id.slice("models/".length));
+        }
+      }
+      return models.size ? models : null;
+    } catch {
+      return null;
+    }
+  })();
+  liveModelInflight.set(platform, request);
+  try {
+    const models = await request;
+    liveModelCache.set(platform, { at: Date.now(), models });
+    return models;
+  } finally {
+    liveModelInflight.delete(platform);
+  }
+}
+
+async function filterProviderCatalog(candidates: string[]): Promise<string[]> {
+  const parsed = candidates.map((id) => ({ id, parsed: splitModel(id) })).filter((x) => x.parsed);
+  const platforms = [...new Set(parsed.map((x) => x.parsed!.platform))];
+  const discovered = new Map(await Promise.all(
+    platforms.map(async (platform) => [platform, await liveProviderModels(platform)] as const),
+  ));
+  return parsed
+    .filter(({ parsed }) => {
+      const live = discovered.get(parsed!.platform);
+      return live === null || live === undefined || live.has(parsed!.upstreamModel);
+    })
+    .map(({ id }) => id);
+}
+
 // The deck's model toggle stores registry ids (no platform prefix, e.g.
 // "meta/llama-4-maverick-17b-128e-instruct") in model-config. Translate those to
 // the router's "<platform>/<model>" space so a model disabled on the deck is ALSO
@@ -574,7 +651,8 @@ export async function disabledModelIds(): Promise<Set<string>> {
 
 async function fallbackAutoChain(): Promise<string[]> {
   const disabled = await disabledModelIds();
-  return await filterAvailableModels(FALLBACK_AUTO_CHAIN.filter((id) => !disabled.has(id)));
+  const enabled = FALLBACK_AUTO_CHAIN.filter((id) => !disabled.has(id));
+  return await filterAvailableModels(await filterProviderCatalog(enabled));
 }
 
 // Public accessor for the auto rotation chain (router "<platform>/<model>" ids,
@@ -604,11 +682,12 @@ async function autoChain(): Promise<string[]> {
       .map((m) => `${m.platform}/${m.model}`)
       .filter((id) => !disabled.has(id));
     const unique = [...new Set(catalog)].sort(byBestModel((m) => m));
-    if (unique.length) return await filterAvailableModels(unique);
+    if (unique.length) return await filterAvailableModels(await filterProviderCatalog(unique));
     return await fallbackAutoChain();
   } catch (e) {
     console.warn("[llm-router] model catalog unavailable; using fallback auto chain:", e);
-    return await filterAvailableModels(FALLBACK_AUTO_CHAIN);
+    // Even the emergency path must respect user opt-outs.
+    return await fallbackAutoChain();
   }
 }
 
@@ -780,6 +859,9 @@ async function routeOne(
     }),
   );
   let lastErr = `All ${keys.length} ${platform} key(s) failed.`;
+  let lastStatus = 503;
+  let modelCooldownMs = COOLDOWN_MS.network;
+  let shouldCoolModel = false;
 
   for (const key of keys) {
     // A per-key baseUrl overrides the provider default — required for
@@ -802,7 +884,9 @@ async function routeOne(
       await markCooldown(key.id, COOLDOWN_MS.network);
       const timedOut = e?.name === "TimeoutError" || e?.name === "AbortError";
       lastErr = timedOut ? `timed out after ${Math.round(budget.timeoutMs / 1000)}s` : `network error: ${e?.message ?? e}`;
-      await markModelCooldown(platform, upstreamModel, COOLDOWN_MS.network, lastErr);
+      lastStatus = 503;
+      modelCooldownMs = Math.max(modelCooldownMs, COOLDOWN_MS.network);
+      shouldCoolModel = true;
       pushRouterEvent({ kind: "cooldown", model: `${platform}/${upstreamModel}`, key: key.id.slice(0, 8), detail: timedOut ? `timed out ${Math.round(budget.timeoutMs / 1000)}s` : "network error" });
       appendRouterCooldownLog({
         kind: "network",
@@ -811,7 +895,7 @@ async function routeOne(
         detail: lastErr,
         cooldownMs: COOLDOWN_MS.network,
       });
-      return { ok: false, status: 503, error: lastErr };
+      continue;
     }
 
     if (res.ok) {
@@ -830,7 +914,6 @@ async function routeOne(
     if (res.status === 429) {
       console.log(`[llm-router] ⏭ key ${key.id.slice(0, 8)} 429 (cooldown) — next key`);
       await markCooldown(key.id, budget.cdRateLimit);
-      await markModelCooldown(platform, upstreamModel, budget.cdRateLimit, "429 rate limit");
       pushRouterEvent({ kind: "cooldown", model: `${platform}/${upstreamModel}`, key: key.id.slice(0, 8), status: 429, detail: "429 rate limit" });
       appendRouterCooldownLog({
         kind: "rate_limit",
@@ -841,12 +924,14 @@ async function routeOne(
         cooldownMs: budget.cdRateLimit,
       });
       lastErr = `429 from ${platform}`;
-      return { ok: false, status: 429, error: lastErr };
+      lastStatus = 429;
+      modelCooldownMs = Math.max(modelCooldownMs, budget.cdRateLimit);
+      shouldCoolModel = true;
+      continue;
     }
     if (res.status >= 500) {
       console.log(`[llm-router] ⏭ key ${key.id.slice(0, 8)} ${res.status} — next key`);
       await markCooldown(key.id, COOLDOWN_MS.serverError);
-      await markModelCooldown(platform, upstreamModel, COOLDOWN_MS.serverError, `${res.status} server error`);
       pushRouterEvent({ kind: "cooldown", model: `${platform}/${upstreamModel}`, key: key.id.slice(0, 8), status: res.status, detail: `${res.status} server error` });
       appendRouterCooldownLog({
         kind: "server_error",
@@ -857,7 +942,10 @@ async function routeOne(
         cooldownMs: COOLDOWN_MS.serverError,
       });
       lastErr = `${res.status} from ${platform}`;
-      return { ok: false, status: res.status, error: lastErr };
+      lastStatus = res.status;
+      modelCooldownMs = Math.max(modelCooldownMs, COOLDOWN_MS.serverError);
+      shouldCoolModel = true;
+      continue;
     }
     // 413 "Request too large" is, on free tiers, a tokens-per-minute rate limit
     // (Groq returns it with code "rate_limit_exceeded" / type "tokens" when
@@ -870,7 +958,6 @@ async function routeOne(
       const detail = await res.text().catch(() => "");
       console.log(`[llm-router] ⏭ key ${key.id.slice(0, 8)} 413 (too large / TPM) — next key`);
       await markCooldown(key.id, budget.cdRateLimit);
-      await markModelCooldown(platform, upstreamModel, budget.cdRateLimit, "413 too large / TPM");
       pushRouterEvent({ kind: "cooldown", model: `${platform}/${upstreamModel}`, key: key.id.slice(0, 8), status: 413, detail: "413 too large / TPM" });
       appendRouterCooldownLog({
         kind: "rate_limit",
@@ -881,12 +968,31 @@ async function routeOne(
         cooldownMs: budget.cdRateLimit,
       });
       lastErr = `413 from ${platform}/${upstreamModel}${detail ? `: ${detail.slice(0, 200)}` : ""}`;
-      return { ok: false, status: 413, error: lastErr };
+      lastStatus = 413;
+      modelCooldownMs = Math.max(modelCooldownMs, budget.cdRateLimit);
+      shouldCoolModel = true;
+      continue;
     }
-    // Non-retryable client error (400/401/404 …) — the model is rejecting
-    // requests, so cool the key down (default 1 day, tunable) instead of leaving
-    // it warm and getting it re-picked every turn. Still surface the upstream
-    // response verbatim so the caller sees the real error.
+    // Authentication is key-specific. Park this account and keep walking the
+    // pool; another account may be perfectly healthy for the same model.
+    if (res.status === 401 || res.status === 403) {
+      await markCooldown(key.id, budget.cdClientError);
+      lastStatus = res.status;
+      lastErr = `${res.status} authentication error from ${platform}`;
+      pushRouterEvent({ kind: "client_error", model: `${platform}/${upstreamModel}`, key: key.id.slice(0, 8), status: res.status, detail: lastErr });
+      appendRouterCooldownLog({
+        kind: "client_error",
+        model: `${platform}/${upstreamModel}`,
+        key: key.id.slice(0, 8),
+        status: res.status,
+        detail: lastErr,
+        cooldownMs: budget.cdClientError,
+      });
+      continue;
+    }
+
+    // Other client errors are request/model-specific. Surface the upstream
+    // response so an auto request can immediately move to the next model.
     pushRouterEvent({ kind: "client_error", model: `${platform}/${upstreamModel}`, key: key.id.slice(0, 8), status: res.status, detail: `${res.status} client error` });
     await markCooldown(key.id, budget.cdClientError);
     await markModelCooldown(platform, upstreamModel, budget.cdClientError, `${res.status} client error`);
@@ -901,5 +1007,10 @@ async function routeOne(
     return { ok: true, response: res };
   }
 
-  return { ok: false, status: 503, error: lastErr };
+  // Only park the provider/model pair after every candidate key failed. A
+  // single bad account must not hide a model that another account can serve.
+  if (shouldCoolModel) {
+    await markModelCooldown(platform, upstreamModel, modelCooldownMs, lastErr);
+  }
+  return { ok: false, status: lastStatus, error: lastErr };
 }

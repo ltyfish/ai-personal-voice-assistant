@@ -2147,7 +2147,8 @@ export default function VoiceButton({ onDone }: { onDone: () => void }) {
         <SwirlOrb state={orb as any} />
 
         {/* Title + status sit above the orb */}
-        <h1 className="jarvis-title">J.A.R.V.I.S.</h1>
+        <p className="jarvis-kicker">Private command layer</p>
+        <h1 className="jarvis-title">JARVIS</h1>
         <p className="jarvis-caption">{label}</p>
 
         <button
@@ -2194,7 +2195,7 @@ export default function VoiceButton({ onDone }: { onDone: () => void }) {
             className="jarvis-type-input"
             value={typed}
             onChange={(e) => setTyped(e.target.value)}
-            placeholder="Type a command…"
+            placeholder="Ask, plan, or run something"
             disabled={status === "thinking"}
           />
           <button
@@ -2203,7 +2204,9 @@ export default function VoiceButton({ onDone }: { onDone: () => void }) {
             disabled={!typed.trim() || status === "thinking"}
             aria-label="Send typed command"
           >
-            ➤
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M5 12h13M13 6l6 6-6 6" />
+            </svg>
           </button>
         </form>
 

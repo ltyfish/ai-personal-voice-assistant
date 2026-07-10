@@ -33,12 +33,12 @@ export const ROUTER_DEFAULTS: RouterConfig = {
   // Hard per-call ceiling. Kept well UNDER the serverless function budget
   // (voice/page run with maxDuration 60s) so one slow/hanging upstream can't
   // eat the whole request and trigger a 504 before any fallback is tried.
-  timeoutMs: 15_000,
+  timeoutMs: 8_000,
   cooldownRateLimitMs: 30 * 60_000, // 30 min
   cooldownClientErrorMs: 24 * 60 * 60_000, // 1 day
   // Don't burn the entire request walking every key of a dead/throttled
   // provider — fail over to the next model after a few tries.
-  maxKeysPerModel: 3,
+  maxKeysPerModel: 2,
 };
 
 // Bounds keep the UI sliders sane and stop a bad value from hanging requests.
