@@ -2141,15 +2141,13 @@ export default function VoiceButton({ onDone }: { onDone: () => void }) {
         </div>
       )}
 
-      {/* ── Center: the big J.A.R.V.I.S. orb ── */}
+      {/* Spatial command core */}
       <div className="jarvis-center">
-        {/* Full-bleed DNA-stream orb behind everything, reacting to state */}
-        <SwirlOrb state={orb as any} />
-
-        {/* Title + status sit above the orb */}
-        <p className="jarvis-kicker">Private command layer</p>
-        <h1 className="jarvis-title">JARVIS</h1>
-        <p className="jarvis-caption">{label}</p>
+        <div className="jarvis-heading">
+          <p className="jarvis-kicker">Private command layer</p>
+          <h1 className="jarvis-title">JARVIS</h1>
+          <p className="jarvis-caption">{label}</p>
+        </div>
 
         <button
           onClick={() => {
@@ -2158,17 +2156,11 @@ export default function VoiceButton({ onDone }: { onDone: () => void }) {
           className={`jarvis-orb ${orb}`}
           aria-label={label}
         >
-          <span className="jo-ticks" aria-hidden />
-          <span className="jo-ring" aria-hidden />
-          <span className="jo-ring2" aria-hidden />
-          <span className="jo-arc" aria-hidden />
-          <span className="jo-arc jo-arc2" aria-hidden />
-          <span className="jo-particles" aria-hidden />
-          <span className="jo-sweep" aria-hidden />
-          <span className="jo-inner" aria-hidden />
-          <span className="jo-reactor" aria-hidden />
-          <span className="jo-core" aria-hidden />
-          <span className="jo-label">J.A.R.V.I.S.</span>
+          <span className="jarvis-core-aura" aria-hidden />
+          <SwirlOrb state={orb as any} />
+          <span className="jarvis-core-frame frame-a" aria-hidden />
+          <span className="jarvis-core-frame frame-b" aria-hidden />
+          <span className="jarvis-core-node" aria-hidden />
         </button>
 
         {/* Capture controls sit right on top of the prompt while active */}
@@ -2210,24 +2202,19 @@ export default function VoiceButton({ onDone }: { onDone: () => void }) {
           </button>
         </form>
 
-        {/* Flowing dock of control cards — continuously slides left→right within
-            the prompt's width and loops; hover to pause, click to open. */}
+        {/* Compact control dock. */}
         <div className="deck-dock">
           <div className="deck-dock-track">
-            {[0, 1].map((dup) =>
-              dockCards.map((c) => (
+            {dockCards.map((c) => (
                 <button
-                  key={`${c.key}-${dup}`}
+                  key={c.key}
                   className={`deck-chip${c.on ? " on" : ""}`}
                   onClick={() => openDeckCard(c.key)}
-                  aria-hidden={dup === 1 ? true : undefined}
-                  tabIndex={dup === 1 ? -1 : undefined}
                 >
                   <span>{c.label}</span>
                   {c.n && <span className="deck-chip-n">{c.n}</span>}
                 </button>
-              ))
-            )}
+              ))}
           </div>
         </div>
       </div>

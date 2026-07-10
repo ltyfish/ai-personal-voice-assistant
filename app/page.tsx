@@ -12,6 +12,7 @@ import { SortableList, type DragHandle } from "@/components/dnd/SortableList";
 import { NestedSortable } from "@/components/dnd/NestedSortable";
 import DesktopPetDownload from "@/components/DesktopPetDownload";
 import "./mail/mail.css";
+import "./mail/redesign.css";
 
 type Task = {
   id: string;

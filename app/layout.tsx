@@ -1,5 +1,18 @@
 import type { Metadata, Viewport } from "next";
+import { JetBrains_Mono, Manrope } from "next/font/google";
 import "./globals.css";
+
+const manrope = Manrope({
+  subsets: ["latin"],
+  variable: "--font-manrope",
+  display: "swap",
+});
+
+const jetbrainsMono = JetBrains_Mono({
+  subsets: ["latin"],
+  variable: "--font-jetbrains-mono",
+  display: "swap",
+});
 
 export const metadata: Metadata = {
   title: "J.A.R.V.I.S.",
@@ -14,7 +27,7 @@ export const metadata: Metadata = {
 };
 
 export const viewport: Viewport = {
-  themeColor: "#0a0a0a",
+  themeColor: "#080b0e",
   width: "device-width",
   initialScale: 1,
   // Allow pinch-zoom — capping maximumScale at 1 locks zoom out, which hurts
@@ -28,8 +41,8 @@ export default function RootLayout({
   children: React.ReactNode;
 }) {
   return (
-    <html lang="en">
-      <body>{children}</body>
+    <html lang="en" className={`${manrope.variable} ${jetbrainsMono.variable}`}>
+      <body className="antialiased">{children}</body>
     </html>
   );
 }

@@ -19,8 +19,24 @@ type Tab = "assistant" | "tasks" | "calendar" | "notes" | "projects" | "abilitie
 
 const URGENCY_LABELS = ["", "Minimal", "Low", "Medium", "High", "Critical"];
 const MORE_TAB_IDS = new Set<Tab>([
-  "abilities", "local", "freellmapi", "github", "feed", "digest", "urgency", "settings",
+  "tasks", "notes", "projects", "github", "feed", "digest", "urgency",
 ]);
+
+const TAB_GLYPHS: Record<Tab, string> = {
+  assistant: "AI",
+  tasks: "TK",
+  calendar: "CL",
+  notes: "NT",
+  projects: "PJ",
+  abilities: "AB",
+  local: "LC",
+  freellmapi: "MD",
+  github: "GH",
+  feed: "IN",
+  digest: "DG",
+  urgency: "UR",
+  settings: "ST",
+};
 
 // ───────────────────────── api hook ─────────────────────────
 function useApi(secret: string) {
@@ -140,20 +156,21 @@ export default function MailApp({
   const isMail = !isOpenTab(tab);
 
   const TABS: { id: Tab; label: string }[] = [
-    ...(tasks ? [{ id: "tasks" as Tab, label: "Tasks" }] : []),
-    ...(calendar ? [{ id: "calendar" as Tab, label: "Calendar" }] : []),
-    ...(projects ? [{ id: "projects" as Tab, label: "Projects" }] : []),
-    ...(notes ? [{ id: "notes" as Tab, label: "Notes" }] : []),
-    { id: "abilities", label: "Abilities" },
+    { id: "assistant", label: "JARVIS" },
     { id: "freellmapi", label: "Models" },
     ...(localOnline ? [{ id: "local" as Tab, label: "Local" }] : []),
+    ...(calendar ? [{ id: "calendar" as Tab, label: "Calendar" }] : []),
+    { id: "abilities", label: "Abilities" },
+    { id: "settings", label: "Settings" },
+    ...(tasks ? [{ id: "tasks" as Tab, label: "Tasks" }] : []),
+    ...(notes ? [{ id: "notes" as Tab, label: "Notes" }] : []),
+    ...(projects ? [{ id: "projects" as Tab, label: "Projects" }] : []),
     { id: "github", label: "GitHub" },
     { id: "feed", label: "Inbox" },
     { id: "digest", label: "Digest" },
     { id: "urgency", label: "Urgency" },
-    { id: "settings", label: "Settings" },
   ];
-  const primaryTabs = TABS.filter((t) => !MORE_TAB_IDS.has(t.id));
+  const primaryTabs = TABS.filter((t) => t.id !== "assistant" && !MORE_TAB_IDS.has(t.id));
   const moreTabs = TABS.filter((t) => MORE_TAB_IDS.has(t.id));
   // On phones the inline pill is hidden, so the hamburger must list EVERY tab.
   const menuTabs = isNarrow ? TABS : moreTabs;
@@ -170,12 +187,15 @@ export default function MailApp({
           onClick={() => selectTab("assistant")}
           title="Go to JARVIS"
         >
-          <span className="nav-brand-dot" />
+          <span className="nav-brand-mark" aria-hidden="true">
+            <span>J</span>
+          </span>
           <span className="nav-brand-copy">
             <strong>JARVIS</strong>
-            <small>Personal operating system</small>
+            <small>Command workspace</small>
           </span>
         </button>
+        <span className="nav-section-label">Workspace</span>
         <div className="nav-links">
           {primaryTabs.map((t) => (
             <a
@@ -187,6 +207,7 @@ export default function MailApp({
                 selectTab(t.id);
               }}
             >
+              <span className="nav-link-glyph" aria-hidden="true">{TAB_GLYPHS[t.id]}</span>
               {t.label}
             </a>
           ))}
@@ -225,6 +246,7 @@ export default function MailApp({
                     if (isNarrow) setMoreOpen(false);
                   }}
                 >
+                  <span className="nav-link-glyph" aria-hidden="true">{TAB_GLYPHS[t.id]}</span>
                   {t.label}
                 </a>
               ))}
