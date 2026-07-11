@@ -7,6 +7,7 @@
 
 import type { LocalStatus } from "@/lib/local-presence";
 import Pipeline from "./Pipeline";
+import DesktopPetDownload from "./DesktopPetDownload";
 
 export default function Local({ status }: { status: LocalStatus }) {
   return (
@@ -25,6 +26,8 @@ export default function Local({ status }: { status: LocalStatus }) {
           Bridge {status.bridge ? "online" : "offline"} · coding pipelines
         </p>
       </header>
+
+      <DesktopPetDownload />
 
       <Pipeline status={status} />
     </div>
