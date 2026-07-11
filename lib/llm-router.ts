@@ -12,11 +12,11 @@
 //   "openrouter/meta-llama/llama-3.3-70b-instruct:free"
 //     -> platform=openrouter, model="meta-llama/llama-3.3-70b-instruct:free"
 
-import { and, eq, isNull, or, lte, sql } from "drizzle-orm";
+import { and, eq, gt, isNull, or, lte, sql } from "drizzle-orm";
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { homedir } from "node:os";
-import { db, llmKeys, llmModels, llmUsage, mailKv } from "@/db";
+import { db, llmKeys, llmModels, llmUsage, mailKv, routerEvents } from "@/db";
 import type { LlmKey } from "@/db";
 import { getRouterConfig } from "./router-config";
 import { pushRouterEvent } from "./router-feed";
@@ -318,6 +318,32 @@ export function normalizeModelCooldownCatalogId(model: string): string {
   return normalizeModelCooldownId(model);
 }
 
+// Recent per-model health, read from the live router-events tail (already
+// pruned to ~400 rows, so this is one cheap query). A model with repeated
+// failures and no successes inside the window is "shaky" — it stays in the
+// chain but is DEMOTED behind healthy models, so the front of a turn isn't
+// spent retrying a struggling provider's remaining keys.
+const HEALTH_WINDOW_MS = 10 * 60_000;
+const HEALTH_FAIL_KINDS = new Set(["cooldown", "client_error", "nokeys"]);
+
+async function recentModelHealth(): Promise<Record<string, { fails: number; serves: number }>> {
+  try {
+    const rows = await db
+      .select({ kind: routerEvents.kind, model: routerEvents.model })
+      .from(routerEvents)
+      .where(gt(routerEvents.at, Date.now() - HEALTH_WINDOW_MS));
+    const out: Record<string, { fails: number; serves: number }> = {};
+    for (const r of rows) {
+      const slot = (out[r.model] ??= { fails: 0, serves: 0 });
+      if (r.kind === "served") slot.serves++;
+      else if (HEALTH_FAIL_KINDS.has(r.kind)) slot.fails++;
+    }
+    return out;
+  } catch {
+    return {};
+  }
+}
+
 async function filterAvailableModels(candidates: string[]): Promise<string[]> {
   // ONE query for every active model cooldown (keyed by normalized model id),
   // instead of a per-candidate getModelCooldown round-trip — on Neon that turned
@@ -326,7 +352,7 @@ async function filterAvailableModels(candidates: string[]): Promise<string[]> {
   // already-cooled model on every request floods the rotation log and makes it
   // look like the router is still trying cooled models when it isn't. Cooldowns
   // are only surfaced when a model actually fails (in routeOne).
-  const cooled = await getActiveModelCooldowns();
+  const [cooled, health] = await Promise.all([getActiveModelCooldowns(), recentModelHealth()]);
   const out: string[] = [];
   for (const candidate of candidates) {
     const parsed = splitModel(candidate);
@@ -334,7 +360,13 @@ async function filterAvailableModels(candidates: string[]): Promise<string[]> {
     if (cooled[normalizeModelCooldownId(parsed.upstreamModel)]) continue;
     out.push(candidate);
   }
-  return out;
+  // Health demotion (stable): shaky models (≥2 recent failures and more failures
+  // than successes) sink to the back but remain reachable as a last resort.
+  const shaky = (id: string) => {
+    const h = health[id];
+    return !!h && h.fails >= 2 && h.fails > h.serves;
+  };
+  return [...out.filter((id) => !shaky(id)), ...out.filter(shaky)];
 }
 
 // ── token usage tracking ────────────────────────────────────────────────────
