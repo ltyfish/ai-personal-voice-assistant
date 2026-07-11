@@ -780,6 +780,12 @@ async function routeOne(
     }),
   );
   let lastErr = `All ${keys.length} ${platform} key(s) failed.`;
+  let lastStatus = 503;
+  // Model-level cooldown is set ONLY when EVERY tried key failed the same way —
+  // one key's per-minute 429 must never bench the whole model (that was silently
+  // degrading the auto chain to weak models for 30 min at a time). Track the
+  // last failure so the all-keys-failed exit can describe it.
+  let lastFailure: { kind: CooldownLogKind; detail: string; cooldownMs: number } | null = null;
 
   for (const key of keys) {
     // A per-key baseUrl overrides the provider default — required for
@@ -802,7 +808,8 @@ async function routeOne(
       await markCooldown(key.id, COOLDOWN_MS.network);
       const timedOut = e?.name === "TimeoutError" || e?.name === "AbortError";
       lastErr = timedOut ? `timed out after ${Math.round(budget.timeoutMs / 1000)}s` : `network error: ${e?.message ?? e}`;
-      await markModelCooldown(platform, upstreamModel, COOLDOWN_MS.network, lastErr);
+      lastStatus = 503;
+      lastFailure = { kind: "network", detail: lastErr, cooldownMs: COOLDOWN_MS.network };
       pushRouterEvent({ kind: "cooldown", model: `${platform}/${upstreamModel}`, key: key.id.slice(0, 8), detail: timedOut ? `timed out ${Math.round(budget.timeoutMs / 1000)}s` : "network error" });
       appendRouterCooldownLog({
         kind: "network",
@@ -811,7 +818,15 @@ async function routeOne(
         detail: lastErr,
         cooldownMs: COOLDOWN_MS.network,
       });
-      return { ok: false, status: 503, error: lastErr };
+      // A timeout is usually the MODEL/provider being slow, not this one key —
+      // don't burn the remaining keys on the same hung upstream; fail over to
+      // the next model now. A plain network error may be key/route specific, so
+      // keep rotating keys for it.
+      if (timedOut) {
+        await markModelCooldown(platform, upstreamModel, COOLDOWN_MS.network, lastErr);
+        return { ok: false, status: 503, error: lastErr };
+      }
+      continue;
     }
 
     if (res.ok) {
@@ -829,8 +844,8 @@ async function routeOne(
     // caller's fault — return immediately rather than burning every key.
     if (res.status === 429) {
       console.log(`[llm-router] ⏭ key ${key.id.slice(0, 8)} 429 (cooldown) — next key`);
+      void res.body?.cancel().catch(() => {});
       await markCooldown(key.id, budget.cdRateLimit);
-      await markModelCooldown(platform, upstreamModel, budget.cdRateLimit, "429 rate limit");
       pushRouterEvent({ kind: "cooldown", model: `${platform}/${upstreamModel}`, key: key.id.slice(0, 8), status: 429, detail: "429 rate limit" });
       appendRouterCooldownLog({
         kind: "rate_limit",
@@ -841,12 +856,14 @@ async function routeOne(
         cooldownMs: budget.cdRateLimit,
       });
       lastErr = `429 from ${platform}`;
-      return { ok: false, status: 429, error: lastErr };
+      lastStatus = 429;
+      lastFailure = { kind: "rate_limit", detail: "429 rate limit on every tried key", cooldownMs: budget.cdRateLimit };
+      continue;
     }
     if (res.status >= 500) {
       console.log(`[llm-router] ⏭ key ${key.id.slice(0, 8)} ${res.status} — next key`);
+      void res.body?.cancel().catch(() => {});
       await markCooldown(key.id, COOLDOWN_MS.serverError);
-      await markModelCooldown(platform, upstreamModel, COOLDOWN_MS.serverError, `${res.status} server error`);
       pushRouterEvent({ kind: "cooldown", model: `${platform}/${upstreamModel}`, key: key.id.slice(0, 8), status: res.status, detail: `${res.status} server error` });
       appendRouterCooldownLog({
         kind: "server_error",
@@ -857,7 +874,9 @@ async function routeOne(
         cooldownMs: COOLDOWN_MS.serverError,
       });
       lastErr = `${res.status} from ${platform}`;
-      return { ok: false, status: res.status, error: lastErr };
+      lastStatus = res.status;
+      lastFailure = { kind: "server_error", detail: `${res.status} server error on every tried key`, cooldownMs: COOLDOWN_MS.serverError };
+      continue;
     }
     // 413 "Request too large" is, on free tiers, a tokens-per-minute rate limit
     // (Groq returns it with code "rate_limit_exceeded" / type "tokens" when
@@ -870,7 +889,6 @@ async function routeOne(
       const detail = await res.text().catch(() => "");
       console.log(`[llm-router] ⏭ key ${key.id.slice(0, 8)} 413 (too large / TPM) — next key`);
       await markCooldown(key.id, budget.cdRateLimit);
-      await markModelCooldown(platform, upstreamModel, budget.cdRateLimit, "413 too large / TPM");
       pushRouterEvent({ kind: "cooldown", model: `${platform}/${upstreamModel}`, key: key.id.slice(0, 8), status: 413, detail: "413 too large / TPM" });
       appendRouterCooldownLog({
         kind: "rate_limit",
@@ -881,12 +899,33 @@ async function routeOne(
         cooldownMs: budget.cdRateLimit,
       });
       lastErr = `413 from ${platform}/${upstreamModel}${detail ? `: ${detail.slice(0, 200)}` : ""}`;
-      return { ok: false, status: 413, error: lastErr };
+      lastStatus = 413;
+      lastFailure = { kind: "rate_limit", detail: "413 too large / TPM on every tried key", cooldownMs: budget.cdRateLimit };
+      continue;
     }
-    // Non-retryable client error (400/401/404 …) — the model is rejecting
-    // requests, so cool the key down (default 1 day, tunable) instead of leaving
-    // it warm and getting it re-picked every turn. Still surface the upstream
-    // response verbatim so the caller sees the real error.
+    // 401/403 = THIS key is bad (revoked/unauthorized), not the model — cool the
+    // key long and rotate to the next key instead of failing the model.
+    if (res.status === 401 || res.status === 403) {
+      console.log(`[llm-router] ⏭ key ${key.id.slice(0, 8)} ${res.status} (bad key) — next key`);
+      void res.body?.cancel().catch(() => {});
+      await markCooldown(key.id, budget.cdClientError);
+      pushRouterEvent({ kind: "client_error", model: `${platform}/${upstreamModel}`, key: key.id.slice(0, 8), status: res.status, detail: `${res.status} bad key` });
+      appendRouterCooldownLog({
+        kind: "client_error",
+        model: `${platform}/${upstreamModel}`,
+        key: key.id.slice(0, 8),
+        status: res.status,
+        detail: `${res.status} unauthorized key`,
+        cooldownMs: budget.cdClientError,
+      });
+      lastErr = `${res.status} from ${platform} (key unauthorized)`;
+      lastStatus = res.status;
+      continue;
+    }
+    // Other non-retryable client error (400/404/422 …) — the MODEL is rejecting
+    // the request (unknown/decommissioned id, bad params), so cool the key AND
+    // the model (default 1 day, tunable) and surface the upstream response
+    // verbatim so the caller sees the real error and rotates models.
     pushRouterEvent({ kind: "client_error", model: `${platform}/${upstreamModel}`, key: key.id.slice(0, 8), status: res.status, detail: `${res.status} client error` });
     await markCooldown(key.id, budget.cdClientError);
     await markModelCooldown(platform, upstreamModel, budget.cdClientError, `${res.status} client error`);
@@ -901,5 +940,12 @@ async function routeOne(
     return { ok: true, response: res };
   }
 
-  return { ok: false, status: 503, error: lastErr };
+  // Every tried key failed. Only NOW bench the model itself, and only when the
+  // failures were model-shaped (rate limit / server error on all keys) — so the
+  // auto chain skips it proactively next turn without one key's hiccup ever
+  // having degraded the whole model.
+  if (lastFailure) {
+    await markModelCooldown(platform, upstreamModel, lastFailure.cooldownMs, lastFailure.detail);
+  }
+  return { ok: false, status: lastStatus, error: lastErr };
 }
