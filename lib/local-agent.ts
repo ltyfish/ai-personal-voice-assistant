@@ -287,7 +287,7 @@ function browserFallbackReply(text: string, actions: AgentResponse["actions"]): 
   const read = [...browserActions].reverse().find((a) => a.name === "browser_read" && (a.result as any)?.content);
   if (read) {
     const content = String((read.result as any).content || "").replace(/\s+/g, " ").trim();
-    return content ? content.slice(0, 220) : "I opened the page, but couldn't extract a useful result yet.";
+    return content ? content.slice(0, 700) : "I opened the page, but couldn't extract a useful result yet.";
   }
   const snapshotText = [...browserActions]
     .reverse()
@@ -417,7 +417,18 @@ export async function runLocalTurn(
     const roundTools = shouldUseTools ? prep.tools : [];
     const body: any = {
       model: "auto",
-      messages: roundTools.length ? messages : actions.length ? localContinuationPrompt(text, actions, maxWords) : messages,
+      messages: roundTools.length
+        ? messages
+        : actions.length
+        ? localContinuationPrompt(
+            text,
+            actions,
+            // Once a page has been read, the answer is longform on purpose.
+            actions.some((a) => a.name === "browser_read" && (a.result as any)?.content)
+              ? Math.max(maxWords, /\bread\b/i.test(text) ? 220 : 90)
+              : maxWords
+          )
+        : messages,
     };
     if (roundTools.length) {
       body.tools = roundTools;
@@ -524,8 +535,9 @@ export async function runLocalTurn(
       actions.push({ name, args, result });
       // The snapshot returned by open/act/scroll/snapshot is a ref map for
       // interaction, not page prose. If the user asked what's on the page and we
-      // haven't read it yet, tell the model explicitly to call browser_read for
-      // the human-readable text before answering — once is enough.
+      // haven't read it yet, DON'T rely on the model asking for browser_read (weak
+      // models answer from the ref map instead) — auto-read the page now and hand
+      // the model the actual prose alongside the snapshot.
       const returnedSnapshot =
         (result as any)?.ok !== false &&
         !!((result as any)?.snapshot?.tree || (result as any)?.tree);
@@ -535,11 +547,16 @@ export async function runLocalTurn(
         wantsPageSubstance &&
         !nudgedToReadPage &&
         returnedSnapshot &&
-        (name === "browser_open" || name === "browser_act" || name === "browser_scroll" || name === "browser_snapshot")
+        (name === "browser_open" || name === "browser_act" || name === "browser_scroll" || name === "browser_snapshot") &&
+        new Set(getEnabledLocalToolNames()).has("browser_read")
       ) {
         nudgedToReadPage = true;
-        toolContent +=
-          "\n\nNOTE: the `tree`/`snapshot` above is only an interaction ref map, NOT the page's readable text. The user asked what is on the page, so call browser_read now to get the actual prose/results before you answer — do not summarize from this ref map.";
+        const readResult = await dispatchLocalTool("browser_read", {});
+        actions.push({ name: "browser_read", args: { auto: true }, result: readResult });
+        const pageProse = String((readResult as any)?.content || "").replace(/\s+/g, " ").trim();
+        toolContent += pageProse
+          ? `\n\nPAGE TEXT (auto-read because the user asked what's on the page — answer from THIS prose, not the ref map above):\n${pageProse.slice(0, 5000)}`
+          : "\n\nNOTE: the `tree`/`snapshot` above is only an interaction ref map, NOT the page's readable text. Call browser_read to get the actual prose before you answer.";
       }
       messages.push({
         role: "tool",
@@ -555,8 +572,14 @@ export async function runLocalTurn(
       ? reply
       : browserFallbackReply(text, actions);
   // Enforce the spoken-reply word cap (the local model ignores the prompt's ask
-  // more often than the cloud summary pass does).
-  const finalReply = clampWords(rawFinalReply, maxWords);
+  // more often than the cloud summary pass does). A turn that actually READ a
+  // page is longform on purpose — mirroring the cloud path's 90/220-word page
+  // caps — so the 20-word slider must not chop a summary mid-sentence.
+  const readPage = actions.some((a) => a.name === "browser_read" && (a.result as any)?.content);
+  const replyCap = readPage
+    ? Math.max(maxWords, /\bread\b/i.test(text) ? 220 : 90)
+    : maxWords;
+  const finalReply = clampWords(rawFinalReply, replyCap);
 
   // Record this turn into JARVIS's Obsidian state (memory.md / decision.md /
   // activity.md) — fire-and-forget, never blocks the reply. Server-side fs only,
