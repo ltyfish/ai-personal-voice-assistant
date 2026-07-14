@@ -50,14 +50,6 @@ body {
 
 @media (max-width: 640px) {
   .desktop-pet-download {
-    left: 12px;
-    right: 12px;
-    bottom: 12px;
-    align-items: stretch;
-    flex-direction: column;
-  }
-
-  .desktop-pet-download a {
-    text-align: center;
+    display: none;
   }
 }

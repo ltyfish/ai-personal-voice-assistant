@@ -25,16 +25,30 @@ import { pageOpen, pageSnapshot, pageText, pageScroll, pageAct, closeBrowser } f
 import { startPipelinePhase, stopPipeline, isPipelineRunning } from "./pipeline.mjs";
 
 // Load the app's .env.local (project root) so the bridge can read SITE_URL etc.
-// Best-effort: a missing file just leaves process.env untouched. Shell-exported
-// vars normally win (dotenv does not override already-set keys) — EXCEPT when we
-// relaunch ourselves via the "restart_bridge" action, which sets
-// BRIDGE_RELOAD_ENV=1 so the fresh process actually picks up edited .env.local
-// values (RELAY_SECRET / RELAY_URL …) instead of inheriting the old ones.
+// Keep this dependency-free: the bridge is copied into the packaged desktop
+// app as an extra resource, where the web app's node_modules are unavailable.
+// A missing file just leaves process.env untouched. Shell-exported vars normally
+// win — EXCEPT when restart_bridge sets BRIDGE_RELOAD_ENV=1 so the fresh process
+// picks up edited values instead of inheriting stale ones.
 try {
-  const { config } = await import("dotenv");
   const override = /^(1|true|yes|on)$/i.test(process.env.BRIDGE_RELOAD_ENV || "");
-  config({ path: join(dirname(fileURLToPath(import.meta.url)), "../../.env.local"), override });
-} catch { /* dotenv optional — fall back to shell env */ }
+  const envPath = join(dirname(fileURLToPath(import.meta.url)), "../../.env.local");
+  const source = readFileSync(envPath, "utf8");
+  for (const line of source.split(/\r?\n/)) {
+    const match = line.match(/^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)\s*$/);
+    if (!match) continue;
+    const key = match[1];
+    let value = match[2].trim();
+    const quote = value[0];
+    if ((quote === '"' || quote === "'") && value.endsWith(quote)) {
+      value = value.slice(1, -1);
+      if (quote === '"') value = value.replace(/\\n/g, "\n").replace(/\\r/g, "\r");
+    } else {
+      value = value.replace(/\s+#.*$/, "").trim();
+    }
+    if (override || process.env[key] === undefined) process.env[key] = value;
+  }
+} catch { /* .env.local is optional */ }
 
 const HOST = "127.0.0.1";
 const PORT = Number(process.env.BRIDGE_PORT) || 7777;
@@ -1813,7 +1827,7 @@ function installAutostart() {
 
 // Relaunch the bridge so it re-reads .env.local. Spawn a fresh DETACHED node
 // straight away (no shell, so no quoting pitfalls); it carries
-// BRIDGE_RELOAD_ENV=1 which (a) makes dotenv override stale env values and (b)
+// BRIDGE_RELOAD_ENV=1 which (a) makes the env loader override stale values and (b)
 // makes the new process RETRY binding the port until this one exits below and
 // frees it — see the server "error" handler. This is how the web app's
 // "Restart" button applies edited RELAY_SECRET / RELAY_URL without a manual
